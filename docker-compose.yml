@@ -1,0 +1,119 @@
+services:
+  # PostgreSQL with pgvector
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: arcgis-mcp-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: gisdb
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis for caching
+  redis:
+    image: redis:7-alpine
+    container_name: arcgis-mcp-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # MCP Client (REST API + MCP host)
+  mcp-mapgpt-client:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-mapgpt
+    container_name: arcgis-mcp-client
+    ports:
+      - "8002:8002"
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/gisdb
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+      ARCGIS_MCP_URL: "in-process"
+      SESSION_TTL_SECONDS: "7200"
+      MAX_HISTORY_TURNS: "3"
+    volumes:
+      - ./mcp-mapgpt-client:/app
+      - ./mcp-arcgis-server:/app/mcp-arcgis-server
+      - ./logs:/app/logs
+      - ./uploads:/app/uploads
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 300s
+    command: uvicorn main:app --host 0.0.0.0 --port 8002 --reload
+
+  # Celery Worker
+  celery-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp-mapgpt
+    container_name: arcgis-mcp-celery-worker
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/gisdb
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/1
+      CELERY_RESULT_BACKEND: redis://redis:6379/2
+    volumes:
+      - ./mcp-mapgpt-client:/app
+      - ./uploads:/app/uploads
+    depends_on:
+      - postgres
+      - redis
+    command: celery -A tasks.celery_app worker --loglevel=info
+
+  # Web Chat UI (demo only)
+  webchat-ui:
+    build:
+      context: .
+      dockerfile: Dockerfile.webchat
+    container_name: arcgis-mcp-webchat
+    ports:
+      - "8080:8080"
+    env_file:
+      - .env
+    environment:
+      GIS_CLIENT_URL: http://mcp-mapgpt-client:8002
+    depends_on:
+      mcp-mapgpt-client:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    profiles:
+      - demo
+    command: uvicorn web_app:app --host 0.0.0.0 --port 8080 --log-level info
+
+volumes:
+  postgres_data:
+  redis_data:

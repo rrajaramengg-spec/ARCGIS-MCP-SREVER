@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <title>GIS Chat Diagnostics</title>
+    <link rel="stylesheet" href="https://js.arcgis.com/5.0/@arcgis/core/assets/esri/themes/light/main.css" />
+    <script type="module" src="https://js.arcgis.com/5.0/"></script>
+    <style>
+        body {
+            font-family: monospace;
+            padding: 20px;
+        }
+
+        .ok {
+            color: green;
+        }
+
+        .fail {
+            color: red;
+        }
+
+        .warn {
+            color: orange;
+        }
+
+        #log {
+            white-space: pre-wrap;
+            line-height: 1.8;
+        }
+
+        #test-map {
+            width: 400px;
+            height: 300px;
+            border: 2px solid #ccc;
+            margin-top: 10px;
+        }
+    </style>
+</head>
+
+<body>
+    <h2>GIS Chat Diagnostic Page</h2>
+    <div id="log"></div>
+    <div id="test-map"></div>
+
+    <script type="module">
+        const log = document.getElementById('log');
+        function ok(msg) { log.innerHTML += `<span class="ok">✓ ${msg}</span>\n`; }
+        function fail(msg) { log.innerHTML += `<span class="fail">✗ ${msg}</span>\n`; }
+        function warn(msg) { log.innerHTML += `<span class="warn">⚠ ${msg}</span>\n`; }
+        function info(msg) { log.innerHTML += `  ${msg}\n`; }
+
+        // 1. DOM check
+        ok('DOM loaded');
+
+        // 2. Vendor libs
+        if (typeof marked !== 'undefined') ok('marked.js loaded');
+        else warn('marked.js NOT loaded (expected - not included in diag page)');
+
+        // 3. WebSocket test
+        try {
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const ws = new WebSocket(`${protocol}//${location.host}/ws/chat`);
+            ws.onopen = () => { ok('WebSocket connected'); ws.close(); };
+            ws.onerror = () => fail('WebSocket error');
+            ws.onclose = (e) => { if (e.code !== 1000) warn(`WebSocket closed: code=${e.code}`); };
+        } catch (e) {
+            fail(`WebSocket exception: ${e.message}`);
+        }
+
+        // 4. ArcGIS SDK
+        info('Waiting for ArcGIS SDK...');
+        let attempts = 0;
+        const check = setInterval(async () => {
+            if (typeof $arcgis !== 'undefined') {
+                clearInterval(check);
+                ok(`ArcGIS $arcgis available (after ${attempts * 200}ms)`);
+
+                try {
+                    const [Map, MapView] = await $arcgis.import([
+                        "@arcgis/core/Map.js",
+                        "@arcgis/core/views/MapView.js"
+                    ]);
+                    ok('$arcgis.import() succeeded');
+
+                    const map = new Map({ basemap: 'streets-navigation-vector' });
+                    const view = new MapView({
+                        container: 'test-map',
+                        map: map,
+                        center: [-98.5, 39.8],
+                        zoom: 4
+                    });
+                    await view.when();
+                    ok('MapView rendered successfully!');
+                } catch (e) {
+                    fail(`Map creation failed: ${e.message}`);
+                    console.error(e);
+                }
+            } else if (++attempts > 100) {
+                clearInterval(check);
+                fail('ArcGIS SDK did not load after 20 seconds');
+            }
+        }, 200);
+
+        // 5. JS module imports
+        try {
+            const config = await import('./js/config.js');
+            ok(`config.js loaded (BASEMAP=${config.BASEMAP})`);
+        } catch (e) {
+            fail(`config.js import failed: ${e.message}`);
+        }
+
+        try {
+            const normalize = await import('./js/normalize.js');
+            ok('normalize.js loaded');
+        } catch (e) {
+            fail(`normalize.js import failed: ${e.message}`);
+        }
+
+        try {
+            const api = await import('./js/api.js');
+            ok('api.js loaded');
+        } catch (e) {
+            fail(`api.js import failed: ${e.message}`);
+        }
+
+        try {
+            const chat = await import('./js/chat.js');
+            ok('chat.js loaded');
+        } catch (e) {
+            fail(`chat.js import failed: ${e.message}`);
+        }
+
+        try {
+            const map = await import('./js/map.js');
+            ok('map.js loaded');
+        } catch (e) {
+            fail(`map.js import failed: ${e.message}`);
+        }
+    </script>
+</body>
+
+</html>

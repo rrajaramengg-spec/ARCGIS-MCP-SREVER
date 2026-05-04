@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcp-arcgis-server"
+version = "0.1.0"
+description = "MCP server exposing ArcGIS REST API operations as tools"
+requires-python = ">=3.11"
+dependencies = [
+    "mcp[cli]>=1.8.0,<2.0.0",
+    "arcgis>=2.4.0",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0",
+    "anyio>=4.0.0",
+    "python-dotenv>=1.1.0",
+]
+
+[project.optional-dependencies]
+http = [
+    "starlette>=0.27.0",
+    "uvicorn[standard]>=0.29.0",
+]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+]
+
+[project.scripts]
+mcp-arcgis-server = "mcp_arcgis_server.main:cli"
+
+[tool.setuptools.packages.find]
+include = ["mcp_arcgis_server*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
