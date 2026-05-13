@@ -14,13 +14,13 @@ def cli():
     """Start the MCP ArcGIS Server with HTTP/SSE transport."""
     load_dotenv()
 
-    from .logging_config import setup_logging
-    setup_logging("mcp-arcgis-server")
-
-    logger = logging.getLogger(__name__)
-
     from .config import ServerConfig
     config = ServerConfig()
+
+    from .logging_config import setup_logging
+    setup_logging("mcp-arcgis-server", config=config)
+
+    logger = logging.getLogger(__name__)
 
     from .server import create_server
     from .transport.http import create_app

@@ -1,36 +1,37 @@
-# webchat-ui
+# mapgpt-webchat-ui
 
-**Demo / Development Only** — A lightweight browser-based chat interface for testing the GIS query API. NOT for production use.
+This package is the optional demo interface for MapGPT. It provides a browser-based chat and map experience for local evaluation, demos, and UI experimentation.
 
-## Features
+It is not required to run the API stack, and it should be treated as a sample client rather than a production deployment target.
 
-- WebSocket chat relay to the MCP client REST API
-- `/` keystroke shows available slash commands with filtered dropdown
-- `@` keystroke shows available MCP resources
-- Slash-command prefix routing (e.g., `/locate Seattle, WA`) handled by backend
-- Command suggestions cached after first fetch
-- Conversation history maintained per browser session
+## What It Includes
 
-## Running
+- a chat surface for natural-language requests
+- an ArcGIS-backed map panel for locate and query results
+- command shortcuts for common actions
+- local build and test tooling for UI changes
 
-```bash
-pip install -r requirements.txt
-uvicorn web_app:app --host 0.0.0.0 --port 8080
-```
-
-Or via Docker Compose:
+## Run It
 
 ```bash
-docker-compose --profile demo up webchat-ui
+npm install
+npm run dev
 ```
 
-## Environment Variables
+Or through Docker Compose:
+
+```bash
+docker-compose --profile demo up -d --build mapgpt-webchat-ui
+```
+
+## Configuration
 
 | Variable | Default | Description |
 |---|---|---|
-| `GIS_CLIENT_URL` | `http://mcp-mapgpt-client:8002` | URL of the MCP client service |
-| `LOG_LEVEL` | `INFO` | Logging level |
+| `MAPGPT_CLIENT_URL` | `http://mcp-mapgpt-client:8002` | Base URL for the API service |
+| `LOG_LEVEL` | `INFO` | Application log level |
 
-## Note
+## Additional Notes
 
-This service is included in Docker Compose under `profiles: [demo]` and is excluded from default production deployments.
+- Detailed implementation notes live in `docs/ARCHITECTURE.md`.
+- The demo UI is excluded from the default Docker Compose profile.

@@ -14,7 +14,7 @@ def _make_llm_response(plan_dict):
     return resp
 
 
-PLAN = {"action": "query", "query": [{"type": "where", "layer": "STATIONS", "layer_url": "http://x", "where": "1=1"}], "message": "ok"}
+PLAN = {"action": "query", "query": [{"type": "where", "layer": "PSAP", "layer_url": "http://x", "where": "1=1"}], "message": "ok"}
 TOOL_RESULT = {"features": [{"attributes": {"NAME": "A"}}], "count": 1}
 
 
@@ -58,7 +58,7 @@ async def test_cache_miss_full_pipeline(mock_mcp, mock_llm, prompts):
                 from core.orchestrator.query_handler import QueryHandler
 
                 handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-                result = await handler.execute("show STATIONS", session_id="s1")
+                result = await handler.execute("show psap", session_id="s1")
 
     assert "query_id" in result
     assert result["action"] == "query"
@@ -79,7 +79,7 @@ async def test_cache_hit_skips_pipeline(mock_mcp, mock_llm, prompts):
             from core.orchestrator.query_handler import QueryHandler
 
             handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-            result = await handler.execute("show STATIONS", session_id="s1")
+            result = await handler.execute("show psap", session_id="s1")
 
     assert result["message"] == "cached"
     assert "query_id" in result
@@ -101,7 +101,7 @@ async def test_query_id_in_response(mock_mcp, mock_llm, prompts):
                 from core.orchestrator.query_handler import QueryHandler
 
                 handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-                result = await handler.execute("show STATIONS", session_id="s1")
+                result = await handler.execute("show psap", session_id="s1")
 
     qid = result.get("query_id")
     assert qid is not None
@@ -123,11 +123,11 @@ async def test_history_stores_plan_json(mock_mcp, mock_llm, prompts):
                 from core.orchestrator.query_handler import QueryHandler
 
                 handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-                await handler.execute("show STATIONS", session_id="s1")
+                await handler.execute("show psap", session_id="s1")
 
     call_args = MockHistory.add_turn.call_args[0]
     assert call_args[0] == "s1"  # session_id
-    assert call_args[1] == "show STATIONS"  # query
+    assert call_args[1] == "show psap"  # query
     assert call_args[2]["action"] == "query"  # plan JSON dict
 
 
@@ -146,6 +146,6 @@ async def test_no_history_without_session_id(mock_mcp, mock_llm, prompts):
                 from core.orchestrator.query_handler import QueryHandler
 
                 handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-                await handler.execute("show STATIONS")
+                await handler.execute("show psap")
 
     MockHistory.add_turn.assert_not_called()

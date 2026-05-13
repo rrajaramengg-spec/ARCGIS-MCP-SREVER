@@ -199,7 +199,7 @@ class TestDirectLocate:
     async def test_locate_address(self):
         from core.llm_service import LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.call_tool = AsyncMock(return_value={
@@ -207,7 +207,7 @@ class TestDirectLocate:
         })
         mock_llm = MagicMock(spec=LLMService)
 
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
         result = await orch.locate(address="123 Main St")
 
         assert result["action"] == "locate"
@@ -219,13 +219,13 @@ class TestDirectLocate:
         """Coordinate pattern in address string routes to reverse_geocode."""
         from core.llm_service import LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.call_tool = AsyncMock(return_value={"address": "Some Place", "location": {"x": -104.9, "y": 39.7}})
         mock_llm = MagicMock(spec=LLMService)
 
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
         result = await orch.locate(address="39.7,-104.9")
 
         assert result["action"] == "locate"
@@ -246,7 +246,7 @@ class TestPrefixRouting:
     async def test_locate_prefix(self):
         from core.llm_service import LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.call_tool = AsyncMock(return_value={
@@ -254,7 +254,7 @@ class TestPrefixRouting:
         })
         mock_llm = MagicMock(spec=LLMService)
 
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
         result = await orch.execute("/locate Denver, CO")
 
         assert result["action"] == "locate"
@@ -264,7 +264,7 @@ class TestPrefixRouting:
     async def test_summarize_prefix(self):
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -277,7 +277,7 @@ class TestPrefixRouting:
         ))
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.execute("/summarize test query")
 
         # Should route to summarize, which returns summary-shaped result
@@ -288,7 +288,7 @@ class TestPrefixRouting:
         """Non-prefixed query runs through normal plan→execute pipeline."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -300,8 +300,8 @@ class TestPrefixRouting:
         ))
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
-            result = await orch.execute("show me BUILDINGSs")
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
+            result = await orch.execute("show me assets")
 
         assert result["action"] == "message"
 
@@ -310,7 +310,7 @@ class TestPrefixRouting:
         """/locating should NOT match /locate prefix."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -322,7 +322,7 @@ class TestPrefixRouting:
         ))
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.execute("/locating something")
 
         # Should go through plan() pipeline, not locate()
@@ -335,7 +335,7 @@ class TestPrefixRouting:
 
 
 class TestCommandsEndpoint:
-    """Tests for /api/v1/commands endpoint."""
+    """Tests for /api/mapgpt/v1/commands endpoint."""
 
     def test_commands_returns_list(self):
         with patch("main.mcp_client") as mock_mcp:
@@ -344,7 +344,7 @@ class TestCommandsEndpoint:
             from main import app
 
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.get("/api/v1/commands")
+            response = client.get("/api/mapgpt/v1/commands")
             assert response.status_code == 200
             cmds = response.json()
             assert isinstance(cmds, list)
@@ -361,7 +361,7 @@ class TestCommandsEndpoint:
             from main import app
 
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.get("/api/v1/commands")
+            response = client.get("/api/mapgpt/v1/commands")
             for cmd in response.json():
                 assert "name" in cmd
                 assert "description" in cmd
@@ -381,7 +381,7 @@ class TestSummarizeStat:
         """Helper to create orchestrator with mocked plan + tools."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -396,7 +396,7 @@ class TestSummarizeStat:
         mock_llm = MagicMock(spec=LLMService)
         mock_llm.complete = AsyncMock(side_effect=[plan_response, summary_response])
 
-        return Orchestrator(mock_mcp, mock_llm), mock_mcp, mock_llm
+        return MapGPTOrchestrator(mock_mcp, mock_llm), mock_mcp, mock_llm
 
     @pytest.mark.asyncio
     async def test_single_field_a_phase(self):
@@ -405,7 +405,7 @@ class TestSummarizeStat:
             "action": "query",
             "query": {
                 "layer_url": "https://test/0",
-                "where": "UPPER(COUNTY) LIKE '%Springfield%'",
+                "where": "UPPER(COUNTY) LIKE '%MADISON%'",
                 "fields": ["SERVICE_STATUS"],
             },
             "message": "Query service status",
@@ -414,7 +414,7 @@ class TestSummarizeStat:
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
             orch, mock_mcp, _ = self._make_orchestrator(plan, mcp_result=stats)
-            result = await orch.summarize_stat("service status in Springfield County")
+            result = await orch.summarize_stat("service status in Madison County")
 
         assert result["action"] == "summarize_stat"
         assert result["field_name"] == "SERVICE_STATUS"
@@ -422,7 +422,7 @@ class TestSummarizeStat:
         mock_mcp.call_tool.assert_called_once_with("summarize_field", {
             "layer_url": "https://test/0",
             "field_name": "SERVICE_STATUS",
-            "where": "UPPER(COUNTY) LIKE '%Springfield%'",
+            "where": "UPPER(COUNTY) LIKE '%MADISON%'",
         })
 
     @pytest.mark.asyncio
@@ -441,7 +441,7 @@ class TestSummarizeStat:
 
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -457,7 +457,7 @@ class TestSummarizeStat:
         ])
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.summarize_stat("what building types exist?")
 
         assert result["action"] == "summarize_stat"
@@ -481,7 +481,7 @@ class TestSummarizeStat:
 
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -500,7 +500,7 @@ class TestSummarizeStat:
         ])
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.summarize_stat("how many features total?")
 
         assert result["action"] == "summarize_stat"
@@ -530,100 +530,113 @@ class TestSummarizeStat:
 
 
 class TestLocateRoute:
-    """Tests for /api/v1/locate endpoint."""
+    """Tests for /api/mapgpt/v1/locate endpoint."""
 
     def test_locate_address(self):
         """9.4: /locate with address input."""
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            with patch("main.orchestrator") as mock_orch:
-                mock_orch.locate = AsyncMock(return_value={
-                    "action": "locate",
-                    "location": {"x": -104, "y": 39},
-                    "address": "123 Main St",
-                    "candidates": None,
-                    "score": 95.0,
-                    "execution_time_ms": 50.0,
-                })
-                from fastapi.testclient import TestClient
-                from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
-                client = TestClient(app, raise_server_exceptions=False)
-                response = client.post(
-                    "/api/v1/locate",
-                    json={"address": "123 Main St"},
-                )
-                assert response.status_code == 200
-                data = response.json()
-                assert data["action"] == "locate"
-                assert data["address"] == "123 Main St"
+        mock_orch = MagicMock()
+        mock_orch.locate = AsyncMock(return_value={
+            "action": "locate",
+            "location": {"x": -104, "y": 39},
+            "address": "123 Main St",
+            "candidates": None,
+            "score": 95.0,
+            "execution_time_ms": 50.0,
+        })
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/api/mapgpt/v1/locate",
+                json={"address": "123 Main St"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["action"] == "locate"
+            assert data["address"] == "123 Main St"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
     def test_locate_coordinates(self):
         """9.5: /locate with coordinate input."""
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            with patch("main.orchestrator") as mock_orch:
-                mock_orch.locate = AsyncMock(return_value={
-                    "action": "locate",
-                    "location": {"x": -104.9, "y": 39.7},
-                    "address": "Some Place",
-                    "candidates": None,
-                    "score": None,
-                    "execution_time_ms": 30.0,
-                })
-                from fastapi.testclient import TestClient
-                from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
-                client = TestClient(app, raise_server_exceptions=False)
-                response = client.post(
-                    "/api/v1/locate",
-                    json={"latitude": 39.7, "longitude": -104.9},
-                )
-                assert response.status_code == 200
-                assert response.json()["action"] == "locate"
+        mock_orch = MagicMock()
+        mock_orch.locate = AsyncMock(return_value={
+            "action": "locate",
+            "location": {"x": -104.9, "y": 39.7},
+            "address": "Some Place",
+            "candidates": None,
+            "score": None,
+            "execution_time_ms": 30.0,
+        })
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/api/mapgpt/v1/locate",
+                json={"latitude": 39.7, "longitude": -104.9},
+            )
+            assert response.status_code == 200
+            assert response.json()["action"] == "locate"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
     def test_locate_invalid_input(self):
         """9.6: /locate with invalid input returns 422."""
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            from fastapi.testclient import TestClient
-            from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
+        mock_orch = MagicMock()
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.post("/api/v1/locate", json={})
+            response = client.post("/api/mapgpt/v1/locate", json={})
             assert response.status_code == 422
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
 
 class TestSummarizeStatRoute:
-    """Tests for /api/v1/summarize-stat endpoint."""
+    """Tests for /api/mapgpt/v1/summarize-stat endpoint."""
 
     def test_summarize_stat_endpoint(self):
         """9.7: /summarize-stat with valid query."""
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            with patch("main.orchestrator") as mock_orch:
-                mock_orch.summarize_stat = AsyncMock(return_value={
-                    "action": "summarize_stat",
-                    "summary": "The average population is 50,000.",
-                    "statistics": {"count": 10, "avg": 50000},
-                    "field_name": "POPULATION",
-                    "layer_url": "https://test/0",
-                    "feature_count": 10,
-                    "execution_time_ms": 100.0,
-                    "status": "success",
-                })
-                from fastapi.testclient import TestClient
-                from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
-                client = TestClient(app, raise_server_exceptions=False)
-                response = client.post(
-                    "/api/v1/summarize-stat",
-                    json={"query": "average population of counties"},
-                )
-                assert response.status_code == 200
-                data = response.json()
-                assert data["action"] == "summarize_stat"
-                assert data["field_name"] == "POPULATION"
+        mock_orch = MagicMock()
+        mock_orch.summarize_stat = AsyncMock(return_value={
+            "action": "summarize_stat",
+            "summary": "The average population is 50,000.",
+            "statistics": {"count": 10, "avg": 50000},
+            "field_name": "POPULATION",
+            "layer_url": "https://test/0",
+            "feature_count": 10,
+            "execution_time_ms": 100.0,
+            "status": "success",
+        })
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
+            client = TestClient(app, raise_server_exceptions=False)
+            response = client.post(
+                "/api/mapgpt/v1/summarize-stat",
+                json={"query": "average population of counties"},
+            )
+            assert response.status_code == 200
+            data = response.json()
+            assert data["action"] == "summarize_stat"
+            assert data["field_name"] == "POPULATION"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
 
 # ---------------------------------------------------------------------------
@@ -639,7 +652,7 @@ class TestIntegration:
         """11.1: /locate prefix through execute → prefix routing → geocode."""
         from core.llm_service import LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.call_tool = AsyncMock(return_value={
@@ -647,7 +660,7 @@ class TestIntegration:
         })
         mock_llm = MagicMock(spec=LLMService)
 
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
         result = await orch.execute("/locate 123 Main Street")
 
         assert result["action"] == "locate"
@@ -659,7 +672,7 @@ class TestIntegration:
         """11.2: /summarize-stat prefix through execute → prefix routing → summarize_field."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         plan = {
             "action": "query",
@@ -683,7 +696,7 @@ class TestIntegration:
         ])
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.execute("/summarize-stat average population of counties")
 
         assert result["action"] == "summarize_stat"
@@ -695,16 +708,16 @@ class TestIntegration:
         """11.3: Standard query through /execute unchanged behavior."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         plan = {
             "action": "query",
             "query": {
                 "layer_url": "https://test/0",
-                "where": "UPPER(COUNTY) LIKE '%Riverside%'",
+                "where": "UPPER(COUNTY) LIKE '%SPRINGFIELD%'",
                 "fields": ["NAME", "ADDRESS"],
             },
-            "message": "BUILDINGSs in Riverside",
+            "message": "Assets in Springfield",
         }
         features = {"features": [{"attributes": {"NAME": "Test"}}], "count": 1}
 
@@ -717,8 +730,8 @@ class TestIntegration:
         mock_llm.complete = AsyncMock(return_value=LLMResponse(content=json.dumps(plan)))
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
-            result = await orch.execute("show me BUILDINGSs in Riverside county")
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
+            result = await orch.execute("show me assets in springfield county")
 
         assert result["action"] == "query"
         # Data is now wrapped in uniform {source, results} shape
@@ -732,7 +745,7 @@ class TestIntegration:
         """11.4: Standard /summarize without prefix unchanged behavior."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         plan = {
             "action": "query",
@@ -753,7 +766,7 @@ class TestIntegration:
         ])
 
         with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock, return_value=("", [])):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.summarize("how many features?")
 
         assert result["action"] == "query"
@@ -769,8 +782,8 @@ class TestIntegration:
             from main import app
 
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.get("/api/v1/commands")
+            response = client.get("/api/mapgpt/v1/commands")
             assert response.status_code == 200
             cmds = response.json()
             names = {c["name"] for c in cmds}
-            assert names == {"/locate", "/summarize", "/summarize-stat", "/arcgis-execute"}
+            assert names == {"/locate", "/summarize", "/summarize-stat", "/arcgis-execute", "/execute-llm"}

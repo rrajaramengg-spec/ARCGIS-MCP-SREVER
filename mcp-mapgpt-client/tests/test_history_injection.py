@@ -19,7 +19,7 @@ def _make_llm_response(plan_dict):
 def mock_llm():
     llm = AsyncMock()
     llm.complete = AsyncMock(
-        return_value=_make_llm_response({"action": "query", "query": [{"layer": "STATIONS"}], "message": "ok"})
+        return_value=_make_llm_response({"action": "query", "query": [{"layer": "PSAP"}], "message": "ok"})
     )
     return llm
 
@@ -51,7 +51,7 @@ async def test_plan_without_history(mock_mcp, mock_llm, prompts):
             from core.orchestrator.query_handler import QueryHandler
 
             handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-            result = await handler.plan("show STATIONS", session_id="s1")
+            result = await handler.plan("show psap", session_id="s1")
 
     assert result["action"] == "query"
 
@@ -60,8 +60,8 @@ async def test_plan_without_history(mock_mcp, mock_llm, prompts):
 async def test_plan_with_one_turn(mock_mcp, mock_llm, prompts):
     """One prior turn — message array is [system, user_1, assistant_1, current_user]."""
     history = [
-        {"role": "user", "content": "show STATIONS"},
-        {"role": "assistant", "content": '{"action":"query","query":[{"layer":"STATIONS"}]}'},
+        {"role": "user", "content": "show psap"},
+        {"role": "assistant", "content": '{"action":"query","query":[{"layer":"PSAP"}]}'},
     ]
 
     with patch("core.orchestrator.query_handler.build_rag_context", return_value=("ctx", [])):
@@ -78,7 +78,7 @@ async def test_plan_with_one_turn(mock_mcp, mock_llm, prompts):
     messages = call_args[0][0]
     assert messages[0]["role"] == "system"
     assert messages[1]["role"] == "user"
-    assert messages[1]["content"] == "show STATIONS"
+    assert messages[1]["content"] == "show psap"
     assert messages[2]["role"] == "assistant"
     assert messages[3]["role"] == "user"  # current query
 
@@ -118,7 +118,7 @@ async def test_plan_history_failure_fallback(mock_mcp, mock_llm, prompts):
             from core.orchestrator.query_handler import QueryHandler
 
             handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-            result = await handler.plan("show STATIONS", session_id="s1")
+            result = await handler.plan("show psap", session_id="s1")
 
     assert result["action"] == "query"
 
@@ -130,6 +130,6 @@ async def test_plan_without_session_id(mock_mcp, mock_llm, prompts):
         from core.orchestrator.query_handler import QueryHandler
 
         handler = QueryHandler(mcp=mock_mcp, llm=mock_llm, prompts=prompts, tools_cache=[])
-        result = await handler.plan("show STATIONS")
+        result = await handler.plan("show psap")
 
     assert result["action"] == "query"

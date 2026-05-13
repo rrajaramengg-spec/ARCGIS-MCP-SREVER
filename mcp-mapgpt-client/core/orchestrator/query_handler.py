@@ -1,7 +1,8 @@
 """
-QueryHandler — RAG + LLM planning, validation, and query execution.
-Extracts plan(), _validate_plan(), and the execute-query pipeline from the
-monolithic orchestrator.
+QueryHandler - RAG + LLM planning, validation, and graph-based execution.
+
+All executable actions (query, analyze, locate) go through the DAG-based
+graph runtime.  Non-executable actions (message, route) return directly.
 """
 
 import asyncio
@@ -13,8 +14,7 @@ import time
 import uuid
 from typing import Any, Callable, Dict, List, Optional
 
-from async_lru import alru_cache
-
+from core.config import ClientConfig
 from core.llm_service import LLMService
 from core.mcp_client import MCPClient
 from core.rag import build_rag_context
@@ -22,8 +22,23 @@ from core.history import ConversationHistory
 from core.response_cache import ResponseCache
 
 from .base import BaseHandler, extract_json, register_handler
+from .validation import validate_plan
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# Module-level utilities (moved from utils.py)
+# ---------------------------------------------------------------------------
+
+from async_lru import alru_cache
+
+_llm_registry: Dict[int, Any] = {}
+
+
+def _register_llm(llm: LLMService) -> None:
+    """Register an LLM service instance for the cached plan function."""
+    _llm_registry[id(llm)] = llm
 
 
 def _normalize_query(query: str) -> str:
@@ -36,6 +51,164 @@ def _hash_context(context_str: str) -> str:
     return hashlib.md5(context_str.encode()).hexdigest()
 
 
+# ---------------------------------------------------------------------------
+# Response result helpers
+# ---------------------------------------------------------------------------
+
+
+def _decompose_proximity(raw: Dict[str, Any], node: Any) -> List[Dict[str, Any]]:
+    """Split find_nearby compound blob into 3 feature_set results.
+
+    Args:
+        raw: Raw compound result from the find_nearby MCP tool.
+        node: The graph node that produced this artifact.
+
+    Returns:
+        List of 3 feature_set dicts with roles: buffer, distance_line, result.
+    """
+    sr = raw.get("spatialReference", {"wkid": 4326})
+    return [
+        {
+            "type": "feature_set",
+            "layer": "_buffer",
+            "features": [{"geometry": raw["buffer_geometry"]}],
+            "count": 1,
+            "geometryType": "esriGeometryPolygon",
+            "spatialReference": sr,
+            "fields": [],
+            "role": "buffer",
+        },
+        {
+            "type": "feature_set",
+            "layer": "_distance",
+            "features": raw.get("proximity_lines", []),
+            "count": len(raw.get("proximity_lines", [])),
+            "geometryType": "esriGeometryPolyline",
+            "spatialReference": sr,
+            "fields": [],
+            "role": "distance_line",
+        },
+        {
+            "type": "feature_set",
+            "layer": getattr(node, "layer_url", "") or "",
+            "features": raw.get("near_features", []),
+            "count": raw.get("count", 0),
+            "geometryType": raw.get("geometryType", "esriGeometryPoint"),
+            "spatialReference": sr,
+            "fields": raw.get("fields", []),
+            "role": "result",
+        },
+    ]
+
+
+def _artifact_to_result(
+    raw: Dict[str, Any], meta: Any, node: Any,
+) -> Dict[str, Any]:
+    """Convert a single graph artifact into a typed result dict.
+
+    Args:
+        raw: Raw artifact data dict.
+        meta: ArtifactMeta with producer info and artifact_type.
+        node: The graph node that produced this artifact.
+
+    Returns:
+        A typed result dict with ``type`` and ``role`` fields.
+    """
+    from core.orchestrator.graph.context import ArtifactType
+
+    at = meta.artifact_type
+
+    # Geocode → geocode type
+    if at == ArtifactType.GEOMETRY:
+        candidates = raw.get("candidates", [])
+        best = candidates[0] if candidates else {}
+        return {
+            "type": "geocode",
+            "location": best.get("location", raw),
+            "address": best.get("address", ""),
+            "score": best.get("score", 0),
+            "candidates": candidates,
+        }
+
+    # Buffer zone → feature_set with buffer role
+    if at == ArtifactType.BUFFER_ZONE:
+        return {
+            "type": "feature_set",
+            "layer": "_buffer",
+            "features": [{"geometry": raw}] if raw else [],
+            "count": 1 if raw else 0,
+            "geometryType": "esriGeometryPolygon",
+            "spatialReference": raw.get("spatialReference", {"wkid": 4326}),
+            "fields": [],
+            "role": "buffer",
+        }
+
+    # Count → feature_set with empty features
+    if at == ArtifactType.COUNT:
+        return {
+            "type": "feature_set",
+            "layer": getattr(node, "layer_url", "") or "",
+            "features": [],
+            "count": raw.get("count", 0),
+            "geometryType": None,
+            "spatialReference": None,
+            "fields": [],
+            "role": "result",
+        }
+
+    # Summary → feature_set with stat attributes as features
+    if at == ArtifactType.SUMMARY:
+        stats = raw.get("statistics", {})
+        field_name = raw.get("field", raw.get("field_name", ""))
+        if stats:
+            # Numeric summary → single-row
+            features = [{"attributes": {**stats, "null_count": raw.get("null_count", 0)}}]
+            fields = [{"name": k, "type": "esriFieldTypeDouble"} for k in stats]
+        else:
+            # String summary → multi-row unique values
+            uv = raw.get("unique_values", [])
+            features = [{"attributes": {"value": v.get("value"), "count": v.get("count", 0)}} for v in uv]
+            fields = [
+                {"name": "value", "type": "esriFieldTypeString"},
+                {"name": "count", "type": "esriFieldTypeInteger"},
+            ]
+        return {
+            "type": "feature_set",
+            "layer": field_name,
+            "features": features,
+            "count": len(features),
+            "geometryType": None,
+            "spatialReference": None,
+            "fields": fields,
+            "role": "result",
+        }
+
+    # Union geometry — intermediate, but include as source marker
+    if at == ArtifactType.UNION_GEOMETRY:
+        return {
+            "type": "feature_set",
+            "layer": "_union",
+            "features": [{"geometry": raw}] if raw else [],
+            "count": 1 if raw else 0,
+            "geometryType": "esriGeometryPolygon",
+            "spatialReference": raw.get("spatialReference", {"wkid": 4326}) if isinstance(raw, dict) else {"wkid": 4326},
+            "fields": [],
+            "role": "source",
+        }
+
+    # Default: FEATURE_SET → feature_set with result role
+    return {
+        "type": "feature_set",
+        "layer": getattr(node, "layer_url", "") or "",
+        "features": raw.get("features", []),
+        "count": raw.get("count", len(raw.get("features", []))),
+        "geometryType": raw.get("geometryType", None),
+        "spatialReference": raw.get("spatialReference", None),
+        "fields": raw.get("fields", []),
+        "role": "result",
+    }
+
+
 @alru_cache(maxsize=128, ttl=300)
 async def _cached_plan(
     normalized_query: str,
@@ -44,11 +217,7 @@ async def _cached_plan(
     human_message: str,
     llm_service_id: int,
 ) -> Dict[str, Any]:
-    """Module-level cached plan generation. NOT an instance method.
-
-    The llm_service_id is id(llm_service) — used only to look up the service
-    from the module-level registry, not as a meaningful cache key component.
-    """
+    """Module-level cached plan generation."""
     llm = _llm_registry.get(llm_service_id)
     if llm is None:
         raise RuntimeError("LLM service not registered for cached plan call")
@@ -57,9 +226,6 @@ async def _cached_plan(
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": human_message},
     ]
-
-    # Call LLM directly — NO tool loop, NO tools.
-    # This eliminates the latent double-execution risk.
     response = await llm.complete(messages, tools=None, json_mode=True)
 
     if response.content:
@@ -72,13 +238,9 @@ async def _cached_plan(
     return {"action": "message", "message": "No response generated."}
 
 
-# Registry for LLM services used by the cached plan function
-_llm_registry: Dict[int, Any] = {}
-
-
 @register_handler("query")
 class QueryHandler(BaseHandler):
-    """Handles the full query pipeline: RAG → LLM → validate → execute."""
+    """Handles the full query pipeline: RAG -> LLM -> validate -> execute."""
 
     def __init__(
         self,
@@ -86,13 +248,76 @@ class QueryHandler(BaseHandler):
         llm: LLMService,
         prompts: Dict[str, Any],
         tools_cache: List[Dict[str, Any]],
+        rag_service=None,
+        graph_runtime=None,
+        config: Optional[ClientConfig] = None,
     ) -> None:
         super().__init__(mcp, llm)
         self._prompts = prompts
         self._tools_cache = tools_cache
+        self._rag_service = rag_service
         self._last_rag_layers: List[Dict[str, Any]] = []
-        # Register LLM service for module-level cached plan function
-        _llm_registry[id(llm)] = llm
+        self._progress_callback: Optional[Callable] = None
+        self._graph_runtime = graph_runtime
+        self._config = config
+        _register_llm(llm)
+
+    def _resolve_layer_name(self, layer_url: str) -> Optional[str]:
+        """Resolve human-readable layer name from RAG metadata.
+
+        Args:
+            layer_url: Full ArcGIS REST URL of the layer.
+
+        Returns:
+            Human-readable layer name if found, None otherwise.
+        """
+        if not self._last_rag_layers or not layer_url:
+            return None
+        for rag_layer in self._last_rag_layers:
+            if rag_layer.get("url") == layer_url:
+                return rag_layer.get("layer_name")
+        return None
+
+    def _build_node_label(self, node: Any) -> str:
+        """Build a human-readable label for a graph node.
+
+        Args:
+            node: A typed graph node instance.
+
+        Returns:
+            Descriptive label string for DAG visualization.
+        """
+        nt = node.node_type
+        if nt == "geocode":
+            addr = getattr(node, "address", "")
+            return f"Geocode '{addr}'" if addr else "Geocode"
+        layer_url = getattr(node, "layer_url", "") or ""
+        layer_name = self._resolve_layer_name(layer_url)
+        if not layer_name and layer_url:
+            # Fallback: extract last meaningful segment from URL
+            parts = layer_url.rstrip("/").split("/")
+            # Skip numeric layer IDs (e.g., /0, /1)
+            for part in reversed(parts):
+                if not part.isdigit():
+                    layer_name = part
+                    break
+        if nt == "query":
+            return f"Query {layer_name}" if layer_name else "Query"
+        if nt == "buffer":
+            dist = getattr(node, "distance", "")
+            unit = getattr(node, "unit", "")
+            return f"Buffer {dist}{unit}"
+        if nt == "proximity":
+            return f"Find Nearby {layer_name}" if layer_name else "Find Nearby"
+        if nt == "union":
+            return "Union"
+        if nt == "spatial_join":
+            return f"Spatial Join {layer_name}" if layer_name else "Spatial Join"
+        if nt == "summarize":
+            return "Summarize"
+        if nt == "count":
+            return f"Count {layer_name}" if layer_name else "Count"
+        return node.node_id
 
     async def _get_openai_tools(self) -> List[Dict[str, Any]]:
         """Get MCP tools formatted for OpenAI (cached)."""
@@ -102,25 +327,34 @@ class QueryHandler(BaseHandler):
             logger.info("Loaded %d MCP tools for LLM", len(self._tools_cache))
         return self._tools_cache
 
+    # -- Planning ----------------------------------------------------------
+
     async def plan(
         self,
         query: str,
         session_id: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Generate a query plan via RAG + LLM without executing against ArcGIS.
-
-        Calls LLM.complete() directly with tools=None and json_mode=True.
-        Does NOT use run_tool_loop() — eliminates latent double-execution risk.
-        """
+        """Generate a query plan via RAG + LLM without executing against ArcGIS."""
         overall_start = time.perf_counter()
         logger.info("Planning query: %s", query[:100])
 
-        # Step 1: RAG retrieval
         rag_start = time.perf_counter()
-        context_str, rag_layers = await build_rag_context(query)
+        if self._rag_service is not None:
+            context_str, rag_layers = await self._rag_service.build_context(query)
+        else:
+            context_str, rag_layers = await build_rag_context(query)
         self._last_rag_layers = rag_layers
         rag_ms = (time.perf_counter() - rag_start) * 1000
         logger.info("RAG context built (%.0f ms)", rag_ms)
+
+        # Guard: if RAG returns no layers and no patterns, don't call LLM
+        if not rag_layers and not context_str.strip():
+            logger.warning("RAG returned empty context for query: %s", query[:100])
+            return self.build_response(
+                action="message",
+                message="No relevant layers or patterns found in the knowledge base for this query. Please ingest layer data first.",
+                data=None,
+            )
 
         result = await self._plan_from_context(
             query, context_str, session_id=session_id
@@ -128,7 +362,6 @@ class QueryHandler(BaseHandler):
 
         total_ms = (time.perf_counter() - overall_start) * 1000
         logger.info("Plan pipeline complete (%.0f ms total)", total_ms)
-
         return result
 
     async def _plan_from_context(
@@ -142,7 +375,6 @@ class QueryHandler(BaseHandler):
         human_template = self._prompts["query_instructions"]["human"]
         human_message = human_template.format(context=context_str, query=query)
 
-        # Retrieve conversation history (if session_id provided)
         history_turns: List[Dict[str, Any]] = []
         if session_id:
             try:
@@ -150,7 +382,6 @@ class QueryHandler(BaseHandler):
             except Exception as exc:
                 logger.warning("History retrieval failed, proceeding without: %s", exc)
 
-        # Call LLM plan — bypass cache when history exists (session-specific)
         norm_query = _normalize_query(query)
         ctx_hash = _hash_context(context_str)
 
@@ -168,10 +399,7 @@ class QueryHandler(BaseHandler):
         human_message: str,
         history_turns: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Generate a plan with conversation history injected.
-
-        Message array: [system, user_1, assistant_1, ..., current_user_with_rag]
-        """
+        """Generate a plan with conversation history injected."""
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": system_prompt},
         ]
@@ -189,111 +417,30 @@ class QueryHandler(BaseHandler):
                 return {"action": "message", "message": response.content}
         return {"action": "message", "message": "No response generated."}
 
+    # -- Validation --------------------------------------------------------
+
     def _validate_plan(
         self,
         plan: Dict[str, Any],
         rag_layers: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        """Validate and correct URLs and field names in a query plan.
+        """Validate and correct URLs and field names in a query plan."""
+        return validate_plan(plan, rag_layers)
 
-        Compares every layer_url and fields entry against the known-good
-        values from the RAG knowledge base.  Supports query, analyze, and
-        locate-with-children actions.
-        """
-        action = plan.get("action")
-
-        # Build lookup tables from RAG layers
-        url_by_name: Dict[str, str] = {}
-        fields_by_name: Dict[str, set] = {}
-        known_urls: set = set()
-        for layer in rag_layers:
-            name = layer["layer_name"].upper()
-            url = layer["url"]
-            url_by_name[name] = url
-            known_urls.add(url)
-            fields_by_name[name] = {
-                f["field_name"].upper()
-                for f in layer.get("fields", [])
-            }
-
-        def _fix_node(node: Dict[str, Any]) -> None:
-            # Auto-correct "tool" field → "join_type" (task 7.3)
-            if "tool" in node and "join_type" not in node:
-                logger.warning(
-                    "Plan guardrail: renamed 'tool' → 'join_type' (%s)",
-                    node["tool"],
-                )
-                node["join_type"] = node.pop("tool")
-
-            layer_name = (node.get("layer") or "").upper()
-            layer_url = node.get("layer_url", "")
-
-            # URL guardrail
-            if layer_url and layer_url not in known_urls:
-                correct_url = url_by_name.get(layer_name)
-                if correct_url:
-                    logger.warning(
-                        "Plan guardrail: corrected URL for %s: %s → %s",
-                        layer_name, layer_url, correct_url,
-                    )
-                    node["layer_url"] = correct_url
-                else:
-                    logger.warning(
-                        "Plan guardrail: unknown URL %s for layer %s — "
-                        "no matching layer in KB",
-                        layer_url, layer_name,
-                    )
-            elif not layer_url and layer_name in url_by_name:
-                node["layer_url"] = url_by_name[layer_name]
-                logger.warning(
-                    "Plan guardrail: filled missing URL for %s", layer_name
-                )
-
-            # Field name guardrail
-            plan_fields = node.get("fields")
-            if plan_fields and layer_name in fields_by_name:
-                known = fields_by_name[layer_name]
-                valid = [f for f in plan_fields if f.upper() in known]
-                removed = set(f.upper() for f in plan_fields) - known
-                if removed:
-                    logger.warning(
-                        "Plan guardrail: removed unknown fields for %s: %s",
-                        layer_name, removed,
-                    )
-                node["fields"] = valid if valid else plan_fields
-
-            # Recurse into children
-            for child in node.get("children", []):
-                _fix_node(child)
-
-        if action == "query" and "query" in plan:
-            for query_node in plan.get("query", []):
-                _fix_node(query_node)
-        elif action == "analyze" and "analyze" in plan:
-            for analyze_node in plan.get("analyze", []):
-                _fix_node(analyze_node)
-        elif action == "locate":
-            locate = plan.get("locate")
-            nodes = locate if isinstance(locate, list) else [locate] if isinstance(locate, dict) else []
-            for node in nodes:
-                for child in node.get("children", []):
-                    _fix_node(child)
-
-        return plan
+    # -- Location resolution -----------------------------------------------
 
     async def _resolve_location(
         self, node: Dict[str, Any]
     ) -> Dict[str, Any]:
-        """Resolve a root node (address/location/where) to ArcGIS geometry + source metadata.
-
-        Returns dict with keys ``geometry`` (ArcGIS JSON point/polygon) and
-        ``source`` (metadata dict describing origin).
-        """
+        """Resolve a root node (address/location/where) to ArcGIS geometry + source metadata."""
         node_type = node.get("type", "")
 
         if node_type == "address":
             address = node.get("address", "")
-            result = await self._mcp.call_tool("geocode", {"address": address}, progress_callback=self._progress_callback)
+            result = await self._mcp.call_tool(
+                "geocode", {"address": address},
+                **({'progress_callback': self._progress_callback} if self._progress_callback is not None else {}),
+            )
             candidates = result.get("candidates", [])
             if not candidates:
                 raise ValueError(f"Geocode returned no candidates for: {address}")
@@ -336,7 +483,7 @@ class QueryHandler(BaseHandler):
                 "layer_url": layer_url,
                 "where": where,
                 "return_geometry": True,
-            }, progress_callback=self._progress_callback)
+            }, **({'progress_callback': self._progress_callback} if self._progress_callback is not None else {}))
             features = result.get("features", [])
             if not features:
                 raise ValueError(
@@ -374,8 +521,10 @@ class QueryHandler(BaseHandler):
 
         raise ValueError(f"Unknown root node type: {node_type!r}")
 
+    # -- Result wrapping ---------------------------------------------------
+
     def _wrap_query_result(self, tool_result: Any) -> Dict[str, Any]:
-        """Wrap execute_query_plan result in uniform ``{source, results}`` shape."""
+        """Wrap execute_query_plan result in uniform {source, results} shape."""
         if not isinstance(tool_result, dict):
             return {"source": None, "results": []}
 
@@ -427,252 +576,181 @@ class QueryHandler(BaseHandler):
             entry["spatialReference"] = tool_result.get("spatialReference")
         return {"source": None, "results": [entry]}
 
-    async def _execute_locate(
+    # -- Graph runtime path ------------------------------------------------
+
+    async def _execute_via_graph(
         self,
         plan_result: Dict[str, Any],
+        action: str,
         overall_start: float,
+        rag_ms: float,
+        plan_ms: float,
+        validation_ms: float,
     ) -> Dict[str, Any]:
-        """Execute a locate action: geocode/coords, optional children spatial lookup."""
-        locate_payload = plan_result.get("locate")
-        message = plan_result.get("message", "")
+        """Execute a plan via the DAG-based graph runtime."""
+        from core.orchestrator.graph import (
+            GraphContext,
+            GraphRuntime,
+            expand_plan,
+            PlanExpansionError,
+            EXECUTOR_MAP,
+        )
+        from core.orchestrator.graph.context import ArtifactType
+        from core.orchestrator.graph.resilience import CircuitBreaker, RetryBudget
 
-        # Support array or dict format
-        if isinstance(locate_payload, list):
-            locate_nodes = locate_payload
-        elif isinstance(locate_payload, dict):
-            locate_nodes = [locate_payload]
-        else:
+        # Expand LLM plan → ExecutionGraph
+        expand_start = time.perf_counter()
+        try:
+            graph = expand_plan(plan_result, rag_layers=self._last_rag_layers)
+        except PlanExpansionError as exc:
+            logger.error("Graph expansion failed: %s", exc)
             total_ms = (time.perf_counter() - overall_start) * 1000
-            logger.warning("Locate action missing payload, returning message-only")
             return self.build_response(
-                action="locate",
-                message=message or "Could not determine location from query.",
+                action="error",
+                message=f"Plan expansion failed: {exc}",
                 execution_time_ms=total_ms,
+                timing=self.build_timing(
+                    rag_ms=rag_ms, plan_ms=plan_ms, validation_ms=validation_ms,
+                ),
             )
+        expansion_ms = (time.perf_counter() - expand_start) * 1000
 
-        async def _process_locate_node(
-            node: Dict[str, Any],
-        ) -> Dict[str, Any]:
-            """Process one locate node: resolve location + optional children."""
-            try:
-                resolved = await self._resolve_location(node)
-            except ValueError as exc:
-                logger.error("Locate resolve failed: %s", exc)
-                return {"source": {"error": str(exc)}, "results": []}
-
-            source = resolved["source"]
-            geometry = resolved["geometry"]
-            results: List[Dict[str, Any]] = []
-
-            children = node.get("children", [])
-            if children:
-                async def _locate_child(
-                    child: Dict[str, Any], geom: dict = geometry
-                ) -> Dict[str, Any]:
-                    result = await self._mcp.call_tool("query_features", {
-                        "layer_url": child.get("layer_url", ""),
-                        "where": child.get("where", "1=1"),
-                        "geometry_filter": geom,
-                    }, progress_callback=self._progress_callback)
-                    return {
-                        "layer": child.get("layer"),
-                        "layer_url": child.get("layer_url"),
-                        "features": result.get("features", []),
-                        "count": result.get("count", len(result.get("features", []))),
-                        "join_type": "spatial",
-                    }
-
-                tasks = [_locate_child(c) for c in children]
-                child_results = await asyncio.gather(*tasks, return_exceptions=True)
-                for cr in child_results:
-                    if isinstance(cr, Exception):
-                        logger.error("Locate child query failed: %s", cr)
-                    else:
-                        results.append(cr)
-
-            return {"source": source, "results": results}
-
-        # Process all locate nodes in parallel
-        node_tasks = [_process_locate_node(n) for n in locate_nodes]
-        node_results = await asyncio.gather(*node_tasks, return_exceptions=True)
-
-        all_sources: List[Dict[str, Any]] = []
-        all_results: List[Dict[str, Any]] = []
-        for nr in node_results:
-            if isinstance(nr, Exception):
-                logger.error("Locate node failed: %s", nr)
-            else:
-                all_sources.append(nr["source"])
-                all_results.extend(nr["results"])
-
-        source = all_sources[0] if len(all_sources) == 1 else all_sources
-        total_ms = (time.perf_counter() - overall_start) * 1000
-
-        return self.build_response(
-            action="locate",
-            message=message,
-            data={"source": source, "results": all_results},
-            execution_time_ms=total_ms,
+        # Build context
+        budget_limit = self._config.node_retry_budget if self._config else 5
+        semaphore_limit = self._config.arcgis_max_concurrent if self._config else 10
+        cb_threshold = self._config.circuit_breaker_threshold if self._config else 5
+        correlation_id = str(uuid.uuid4())
+        ctx = GraphContext(
+            correlation_id=correlation_id,
+            mcp_client=self._mcp,
+            retry_budget=RetryBudget(max_retries=budget_limit),
+            progress_callback=self._progress_callback,
+            semaphore=asyncio.Semaphore(semaphore_limit),
+            circuit_breaker=CircuitBreaker(failure_threshold=cb_threshold),
         )
 
-    async def _execute_analyze(
+        # Execute graph
+        runtime = self._graph_runtime or GraphRuntime(EXECUTOR_MAP)
+        graph_start = time.perf_counter()
+        result = await runtime.execute(graph, ctx)
+        graph_ms = (time.perf_counter() - graph_start) * 1000
+        total_ms = (time.perf_counter() - overall_start) * 1000
+
+        # Convert GraphResult → response shape
+        return self._graph_result_to_response(
+            result, ctx, graph, action, plan_result,
+            total_ms, rag_ms, plan_ms, validation_ms, expansion_ms, graph_ms,
+        )
+
+    def _graph_result_to_response(
         self,
+        result,
+        ctx,
+        graph,
+        action: str,
         plan_result: Dict[str, Any],
-        overall_start: float,
+        total_ms: float,
+        rag_ms: float,
+        plan_ms: float,
+        validation_ms: float,
+        expansion_ms: float,
+        graph_ms: float,
     ) -> Dict[str, Any]:
-        """Execute an analyze action: resolve location → buffer/proximity queries."""
-        analyze_nodes = plan_result.get("analyze", [])
+        """Convert a GraphResult into the standard ExecuteResponse shape."""
+        from core.orchestrator.graph.context import ArtifactType
+
         message = plan_result.get("message", "")
-        logger.info("Analyze plan: %s", json.dumps(analyze_nodes, default=str)[:2000])
 
-        if not analyze_nodes:
-            total_ms = (time.perf_counter() - overall_start) * 1000
-            return self.build_response(
-                action="analyze",
-                message=message or "No analyze nodes provided.",
-                execution_time_ms=total_ms,
+        # Build results from graph context artifacts
+        results = []
+        for artifact_key, meta in ctx.artifact_meta.items():
+            node_id = meta.producer_node_id
+            node = graph.nodes.get(node_id)
+            if not node:
+                continue
+            raw = ctx.artifacts.get(artifact_key)
+            data = raw if isinstance(raw, dict) else {"value": raw}
+
+            # Proximity nodes produce compound blobs → decompose into 3 entries
+            if (
+                node.node_type == "proximity"
+                and isinstance(data, dict)
+                and "buffer_geometry" in data
+            ):
+                decomposed = _decompose_proximity(data, node)
+                # Enrich proximity results with layer_name/layer_url
+                layer_url = getattr(node, "layer_url", "") or ""
+                resolved_name = self._resolve_layer_name(layer_url)
+                for entry in decomposed:
+                    entry["layer_url"] = entry.get("layer", "")
+                    entry["layer_name"] = resolved_name
+                results.extend(decomposed)
+                continue
+
+            result_entry = _artifact_to_result(data, meta, node)
+            # Enrich feature_set results with layer_name/layer_url
+            if result_entry.get("type") == "feature_set":
+                layer_url = getattr(node, "layer_url", "") or ""
+                result_entry["layer_url"] = layer_url
+                result_entry["layer_name"] = self._resolve_layer_name(layer_url)
+            results.append(result_entry)
+
+        # Sort by display priority: geocode → buffer → distance_line → result
+        _ROLE_ORDER = {"source": 0, "buffer": 1, "distance_line": 2, "result": 3}
+        results.sort(
+            key=lambda r: (
+                0 if r.get("type") == "geocode" else 1,
+                _ROLE_ORDER.get(r.get("role", "result"), 3),
             )
-
-        all_results: List[Dict[str, Any]] = []
-        source: Optional[Dict[str, Any]] = None
-
-        for root_node in analyze_nodes:
-            # Step 1: Resolve root to geometry + source
-            try:
-                resolved = await self._resolve_location(root_node)
-            except ValueError as exc:
-                logger.error("Analyze: failed to resolve location: %s", exc)
-                total_ms = (time.perf_counter() - overall_start) * 1000
-                return self.build_response(
-                    action="analyze",
-                    message=str(exc),
-                    execution_time_ms=total_ms,
-                )
-
-            geometry = resolved["geometry"]
-            source = resolved["source"]
-
-            # Step 2: Process tool nodes (children of root)
-            for tool_node in root_node.get("children", []):
-                if tool_node.get("type") != "tool":
-                    continue
-
-                join_type = tool_node.get("join_type", "buffer")
-                distance = tool_node.get("distance", 1000)
-                unit = tool_node.get("unit", "meters")
-                leaf_children = tool_node.get("children", [])
-                logger.info("Analyze tool_node: join_type=%s, distance=%s, unit=%s, leaf_children=%s",
-                            join_type, distance, unit, json.dumps(leaf_children, default=str)[:500])
-
-                if join_type == "buffer":
-                    # Create buffer polygon (no layer_url → returns buffer_geometry only)
-                    buffer_result = await self._mcp.call_tool("buffer_and_query", {
-                        "geometry": geometry,
-                        "radius": distance,
-                        "unit": unit,
-                    }, progress_callback=self._progress_callback)
-                    buffer_geometry = buffer_result.get("buffer_geometry")
-                    if not buffer_geometry:
-                        logger.error("buffer_and_query returned no buffer_geometry")
-                        continue
-
-                    # Insert _buffer_zone as a renderable result entry
-                    all_results.append({
-                        "layer": "_buffer_zone",
-                        "type": "buffer_zone",
-                        "features": [{
-                            "geometry": buffer_geometry,
-                            "attributes": {"radius": distance, "unit": unit},
-                        }],
-                        "count": 1,
-                        "geometryType": "esriGeometryPolygon",
-                        "spatialReference": buffer_geometry.get(
-                            "spatialReference", {"wkid": 4326}
-                        ),
-                        "join_type": "buffer",
-                    })
-
-                    # Query each child layer with buffer as spatial filter
-                    async def _buffer_child(
-                        child: Dict[str, Any], bg: dict = buffer_geometry
-                    ) -> Dict[str, Any]:
-                        result = await self._mcp.call_tool("query_features", {
-                            "layer_url": child.get("layer_url", ""),
-                            "where": child.get("where", "1=1"),
-                            "geometry_filter": bg,
-                        }, progress_callback=self._progress_callback)
-                        if isinstance(result, str):
-                            logger.error("query_features returned string instead of dict: %s", result[:500])
-                            result = {"features": [], "count": 0, "error": result}
-                        return {
-                            "layer": child.get("layer"),
-                            "layer_url": child.get("layer_url"),
-                            "features": result.get("features", []),
-                            "count": result.get("count", len(result.get("features", []))),
-                            "fields": result.get("fields"),
-                            "geometryType": result.get("geometryType"),
-                            "spatialReference": result.get("spatialReference"),
-                            "join_type": "buffer",
-                        }
-
-                    tasks = [_buffer_child(c) for c in leaf_children]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for r in results:
-                        if isinstance(r, Exception):
-                            logger.error("Buffer child query failed: %s", r)
-                        else:
-                            all_results.append(r)
-
-                elif join_type == "proximity":
-                    top = tool_node.get("top", 20)
-
-                    async def _proximity_child(
-                        child: Dict[str, Any],
-                        geom: dict = geometry,
-                        d: float = distance,
-                        u: str = unit,
-                        t: int = top,
-                    ) -> Dict[str, Any]:
-                        result = await self._mcp.call_tool("find_nearby", {
-                            "layer_url": child.get("layer_url", ""),
-                            "geometry": geom,
-                            "radius": d,
-                            "unit": u,
-                            "where": child.get("where", "1=1"),
-                            "max_results": t,
-                        }, progress_callback=self._progress_callback)
-                        return {
-                            "layer": child.get("layer"),
-                            "layer_url": child.get("layer_url"),
-                            "features": result.get("features", []),
-                            "count": result.get("count", 0),
-                            "total_in_radius": result.get("total_in_radius"),
-                            "search_radius": result.get("search_radius"),
-                            "search_unit": result.get("search_unit"),
-                            "join_type": "proximity",
-                        }
-
-                    tasks = [_proximity_child(c) for c in leaf_children]
-                    results = await asyncio.gather(*tasks, return_exceptions=True)
-                    for r in results:
-                        if isinstance(r, Exception):
-                            logger.error("Proximity child query failed: %s", r)
-                        else:
-                            all_results.append(r)
-
-                else:
-                    logger.warning(
-                        "Unrecognized join_type '%s' — skipping tool node",
-                        join_type,
-                    )
-
-        total_ms = (time.perf_counter() - overall_start) * 1000
-        return self.build_response(
-            action="analyze",
-            message=message,
-            data={"source": source, "results": all_results},
-            execution_time_ms=total_ms,
         )
+
+        # Build execution_graph metadata
+        edges = []
+        node_timing_enriched = []
+        for t in result.node_timing:
+            node = graph.nodes.get(t.node_id)
+            deps = list(node.depends_on) if node else []
+            for dep in deps:
+                edges.append({"source": dep, "target": t.node_id})
+            node_timing_enriched.append({
+                "node_id": t.node_id,
+                "node_type": t.node_type,
+                "ms": round(t.ms, 2),
+                "retries": t.retries,
+                "status": t.status,
+                "depends_on": deps,
+                "label": self._build_node_label(node) if node else t.node_id,
+            })
+
+        execution_graph = {
+            "nodes_executed": len(result.node_timing),
+            "parallel_groups": result.parallel_groups,
+            "retry_budget_used": result.retry_budget_used,
+            "errors": result.errors,
+            "skipped": result.skipped,
+            "artifacts_produced": result.artifacts_produced,
+            "node_timing": node_timing_enriched,
+            "edges": edges,
+        }
+
+        timing = self.build_timing(
+            rag_ms=rag_ms,
+            plan_ms=plan_ms,
+            validation_ms=validation_ms,
+            expansion_ms=expansion_ms,
+            graph_ms=graph_ms,
+        )
+
+        return self.build_response(
+            action=action,
+            message=message,
+            results=results,
+            execution_time_ms=total_ms,
+            timing=timing,
+            execution_graph=execution_graph,
+        )
+
+    # -- Main execute pipeline ---------------------------------------------
 
     async def execute(
         self,
@@ -680,7 +758,7 @@ class QueryHandler(BaseHandler):
         session_id: Optional[str] = None,
         progress_callback: Optional[Callable] = None,
     ) -> Dict[str, Any]:
-        """Execute a query through the full pipeline: plan → validate → MCP tool → raw result."""
+        """Execute a query through the full pipeline: plan -> validate -> MCP tool -> raw result."""
         overall_start = time.perf_counter()
         logger.info("Executing query: %s", query[:100])
         self._progress_callback = progress_callback
@@ -688,12 +766,26 @@ class QueryHandler(BaseHandler):
         query_id = str(uuid.uuid4())
         norm_query = _normalize_query(query)
 
-        # Step 1: RAG retrieval (needed for both cache key and planning)
+        # Step 1: RAG retrieval
         rag_start = time.perf_counter()
-        context_str, rag_layers = await build_rag_context(query)
+        if self._rag_service is not None:
+            context_str, rag_layers = await self._rag_service.build_context(query)
+        else:
+            context_str, rag_layers = await build_rag_context(query)
         self._last_rag_layers = rag_layers
         rag_ms = (time.perf_counter() - rag_start) * 1000
         logger.info("RAG context built (%.0f ms)", rag_ms)
+
+        # Guard: if RAG returns no layers and no patterns, don't call LLM
+        if not rag_layers and not context_str.strip():
+            logger.warning("RAG returned empty context for execute: %s", query[:100])
+            resp = self.build_response(
+                action="message",
+                message="No relevant layers or patterns found in the knowledge base for this query. Please ingest layer data first.",
+                data=None,
+            )
+            resp["query_id"] = query_id
+            return resp
 
         ctx_hash = _hash_context(context_str)
         cache_key = f"fcache:{norm_query}:{ctx_hash}"
@@ -707,9 +799,13 @@ class QueryHandler(BaseHandler):
                 await ResponseCache.store_query_mapping(
                     session_id, query_id, cache_key
                 )
+                cached_msg = cached_response.get("message", "")
+                await ConversationHistory.add_message(
+                    session_id, "assistant", cached_msg
+                )
             return cached_response
 
-        # Step 2: Get the query plan (using pre-computed RAG context)
+        # Step 2: Get the query plan
         plan_start = time.perf_counter()
         plan_result = await self._plan_from_context(
             query, context_str, session_id=session_id
@@ -719,76 +815,27 @@ class QueryHandler(BaseHandler):
         action = plan_result.get("action", "message")
         message = plan_result.get("message", "")
 
-        # Step 1.5: Validate URLs / field names against KB
+        # Validate URLs / field names against KB
         validation_start = time.perf_counter()
         if action in ("query", "analyze", "locate") and self._last_rag_layers:
             plan_result = self._validate_plan(plan_result, self._last_rag_layers)
         validation_ms = (time.perf_counter() - validation_start) * 1000
 
-        # Step 2: Handle locate from plan
-        if action == "locate":
-            result = await self._execute_locate(plan_result, overall_start)
-            result["query_id"] = query_id
-            await self._post_execute(query, session_id, query_id, plan_result, norm_query, ctx_hash, cache_key, result)
-            return result
-
-        # Step 2.5: Handle analyze from plan
-        if action == "analyze":
-            result = await self._execute_analyze(plan_result, overall_start)
-            result["query_id"] = query_id
-            await self._post_execute(query, session_id, query_id, plan_result, norm_query, ctx_hash, cache_key, result)
-            return result
-
-        # Step 3: Non-executable actions (route, message)
-        if action != "query" or "query" not in plan_result:
+        # Non-executable actions (message, route)
+        if action not in ("query", "analyze", "locate"):
             total_ms = (time.perf_counter() - overall_start) * 1000
-            logger.info("Execute: non-query action '%s', skipping tool execution", action)
             result = self.build_response(
                 action=action,
-                message=message,
+                message=plan_result.get("message", ""),
                 execution_time_ms=total_ms,
                 timing=self.build_timing(plan_ms=plan_ms, validation_ms=validation_ms),
             )
             result["query_id"] = query_id
             return result
 
-        # Step 4: Execute the plan via execute_query_plan MCP tool
-        tool_name = "execute_query_plan"
-        tool_args = {"query_plan": json.dumps(plan_result)}
-        tool_result = None
-
-        tool_start = time.perf_counter()
-        try:
-            logger.info("Calling MCP tool: %s", tool_name)
-            tool_result = await self._mcp.call_tool(tool_name, tool_args, progress_callback=self._progress_callback)
-        except Exception as exc:
-            logger.error("Tool %s failed: %s", tool_name, exc)
-            err_msg = (
-                str(exc).strip()
-                or f"Tool {tool_name} failed:"
-                f" {type(exc).__name__}"
-            )
-            tool_result = {"error": err_msg}
-        tool_ms = (time.perf_counter() - tool_start) * 1000
-
-        total_ms = (time.perf_counter() - overall_start) * 1000
-        logger.info("Execute pipeline complete (%.0f ms total)", total_ms)
-
-        # Wrap in uniform {source, results} shape
-        uniform_data = self._wrap_query_result(tool_result)
-
-        result = self.build_response(
-            action=action,
-            message=message,
-            data=uniform_data,
-            tool_name=tool_name,
-            tool_args=tool_args,
-            execution_time_ms=total_ms,
-            timing=self.build_timing(
-                plan_ms=plan_ms,
-                validation_ms=validation_ms,
-                tool_ms=tool_ms,
-            ),
+        # All executable actions go through the graph runtime
+        result = await self._execute_via_graph(
+            plan_result, action, overall_start, rag_ms, plan_ms, validation_ms,
         )
         result["query_id"] = query_id
         await self._post_execute(
@@ -808,10 +855,13 @@ class QueryHandler(BaseHandler):
         cache_key: str,
         response: Dict[str, Any],
     ) -> None:
-        """Cache response and store conversation turn after successful execution."""
-        # Cache the response in Redis
+        """Cache response and store conversation history after successful execution."""
         await ResponseCache.set(norm_query, ctx_hash, response)
         if session_id:
             await ResponseCache.store_query_mapping(session_id, query_id, cache_key)
-            # Store conversation turn (plan JSON, not post-execution data)
-            await ConversationHistory.add_turn(session_id, query, plan_result)
+            action = response.get("action", "")
+            message = response.get("message", "")
+            await ConversationHistory.add_message(session_id, "user", query)
+            await ConversationHistory.add_message(
+                session_id, "assistant", f"Action: {action}. {message}"
+            )

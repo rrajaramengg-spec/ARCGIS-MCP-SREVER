@@ -1,3 +1,17 @@
+# ---------- Stage 1: Build React frontend ----------
+FROM node:22-slim AS frontend-build
+
+WORKDIR /app
+
+# Install dependencies first (cache layer)
+COPY mapgpt-webchat-ui/package.json mapgpt-webchat-ui/package-lock.json* ./
+RUN npm ci --ignore-scripts
+
+# Copy source and build
+COPY mapgpt-webchat-ui/ .
+RUN npm run build
+
+# ---------- Stage 2: Python runtime ----------
 FROM python:3.12-slim
 
 WORKDIR /app
@@ -7,7 +21,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl && rm -rf 
 COPY mapgpt-webchat-ui/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY mapgpt-webchat-ui/ .
+# Copy Python application files (excluding src/, node_modules/, etc.)
+COPY mapgpt-webchat-ui/web_app.py .
+COPY mapgpt-webchat-ui/logging_config.py .
+COPY mapgpt-webchat-ui/__init__.py .
+
+# Copy built React assets from Stage 1
+COPY --from=frontend-build /app/dist ./dist
+
+# Keep legacy static files for diag.html and fallback
+COPY mapgpt-webchat-ui/static ./static
 
 EXPOSE 8080
 

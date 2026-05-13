@@ -68,7 +68,11 @@ class LocateHandler(BaseHandler):
         tool_start = time.perf_counter()
         try:
             logger.info("Direct locate — tool=%s args=%s", tool_name, tool_args)
-            result = await self._mcp.call_tool(tool_name, tool_args, progress_callback=getattr(self, '_progress_callback', None))
+            _cb = getattr(self, '_progress_callback', None)
+            result = await self._mcp.call_tool(
+                tool_name, tool_args,
+                **({'progress_callback': _cb} if _cb is not None else {})
+            )
         except Exception as exc:
             logger.error("Locate tool %s failed: %s", tool_name, exc)
             total_ms = (time.perf_counter() - start) * 1000

@@ -5,11 +5,13 @@ Module-level @alru_cache ensures cache persistence across handler instances.
 """
 
 import logging
-import os
-from typing import List
+from typing import List, Optional
 
+import httpx
 import openai
 from async_lru import alru_cache
+
+from core.config import ClientConfig
 
 logger = logging.getLogger(__name__)
 
@@ -34,15 +36,15 @@ async def _cached_embed_query(text: str) -> List[float]:
 class EmbeddingService:
     """Service for generating embeddings using Azure OpenAI directly."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: ClientConfig) -> None:
         self._client = openai.AsyncAzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+            api_key=config.azure_openai_api_key,
+            azure_endpoint=config.azure_openai_endpoint,
+            api_version=config.azure_openai_api_version,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+            max_retries=2,
         )
-        self._deployment = os.getenv(
-            "AZURE_OPENAI_EMBEDDING_DEPLOYMENT", "text-embedding-3-small"
-        )
+        self._deployment = config.azure_openai_embedding_deployment
         logger.info("EmbeddingService initialised — deployment=%s", self._deployment)
         logger.info(
             "Embedding cache: maxsize=256, ttl=3600, info=%s",
@@ -75,9 +77,18 @@ class EmbeddingService:
 _service: EmbeddingService | None = None
 
 
-def get_embedding_service() -> EmbeddingService:
-    """Get or create the embedding service singleton."""
+def get_embedding_service(config: Optional[ClientConfig] = None) -> EmbeddingService:
+    """Get or create the embedding service singleton.
+
+    Args:
+        config: ClientConfig to use when creating the service for the first time.
+            Ignored if the singleton already exists.
+    """
     global _service
     if _service is None:
-        _service = EmbeddingService()
+        if config is None:
+            from core.config import settings
+
+            config = settings
+        _service = EmbeddingService(config)
     return _service

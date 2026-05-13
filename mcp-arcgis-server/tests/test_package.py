@@ -6,7 +6,6 @@ in-process transport, async thread pool, and token refresh.
 
 import asyncio
 import json
-import os
 import threading
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch, PropertyMock
@@ -20,74 +19,72 @@ class TestGISAuthManager:
     """Tests for GISAuthManager domain-based URL routing and GIS initialization."""
 
     def test_internal_url_detection(self):
-        env = {
-            "ARCGIS_PORTAL_URL": "https://arcgis.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.config import ServerConfig
 
-            auth = GISAuthManager()
-            assert auth.is_internal_url(
-                "https://arcgis.example.com/server/rest/services/Svc/MapServer/0"
-            )
+        config = ServerConfig(
+            portal_url="https://arcgis.example.com/arcgis",
+            username="user",
+            password="pass",
+        )
+        auth = GISAuthManager(config)
+        assert auth.is_internal_url(
+            "https://arcgis.example.com/server/rest/services/Svc/MapServer/0"
+        )
 
     def test_external_url_detection(self):
-        env = {
-            "ARCGIS_PORTAL_URL": "https://arcgis.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.config import ServerConfig
 
-            auth = GISAuthManager()
-            assert not auth.is_internal_url(
-                "https://services.arcgis.com/public/FeatureServer/0"
-            )
+        config = ServerConfig(
+            portal_url="https://arcgis.example.com/arcgis",
+            username="user",
+            password="pass",
+        )
+        auth = GISAuthManager(config)
+        assert not auth.is_internal_url(
+            "https://services.arcgis.com/public/FeatureServer/0"
+        )
 
     def test_case_insensitive_hostname(self):
-        env = {
-            "ARCGIS_PORTAL_URL": "https://ARCGIS.Example.COM/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.config import ServerConfig
 
-            auth = GISAuthManager()
-            assert auth.is_internal_url(
-                "https://arcgis.example.com/server/rest/layer/0"
-            )
+        config = ServerConfig(
+            portal_url="https://ARCGIS.Example.COM/arcgis",
+            username="user",
+            password="pass",
+        )
+        auth = GISAuthManager(config)
+        assert auth.is_internal_url(
+            "https://arcgis.example.com/server/rest/layer/0"
+        )
 
     def test_no_portal_url(self):
-        with patch.dict(
-            os.environ,
-            {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""},
-            clear=False,
+        from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.config import ServerConfig
+
+        config = ServerConfig(portal_url="")
+        auth = GISAuthManager(config)
+        assert not auth.is_internal_url("https://any.server.com/layer/0")
+
+    def test_gis_init_failure_graceful_degradation(self):
+        from mcp_arcgis_server.config import ServerConfig
+
+        config = ServerConfig(
+            portal_url="https://arcgis.example.com/arcgis",
+            username="user",
+            password="pass",
+        )
+        with patch(
+            "mcp_arcgis_server.arcgis.auth.GIS",
+            side_effect=Exception("unreachable"),
         ):
             from mcp_arcgis_server.arcgis.auth import GISAuthManager
 
-            auth = GISAuthManager()
-            assert not auth.is_internal_url("https://any.server.com/layer/0")
-
-    def test_gis_init_failure_graceful_degradation(self):
-        env = {
-            "ARCGIS_PORTAL_URL": "https://arcgis.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            with patch(
-                "mcp_arcgis_server.arcgis.auth.GIS",
-                side_effect=Exception("unreachable"),
-            ):
-                from mcp_arcgis_server.arcgis.auth import GISAuthManager
-
-                auth = GISAuthManager()
-                auth._initialize_gis()
-                assert auth.gis is None
+            auth = GISAuthManager(config)
+            auth._initialize_gis()
+            assert auth.gis is None
 
 
 class TestGeometry:
@@ -393,41 +390,41 @@ class TestTokenRefreshRace:
     async def test_concurrent_refresh_only_one_init(self):
         """Simulate concurrent 498 errors, verify only one re-initialization."""
         from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        from mcp_arcgis_server.config import ServerConfig
 
-        env = {
-            "ARCGIS_PORTAL_URL": "https://arcgis.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            auth = GISAuthManager()
-            init_count = 0
-            original_init = auth._initialize_gis
+        config = ServerConfig(
+            portal_url="https://arcgis.example.com/arcgis",
+            username="user",
+            password="pass",
+        )
+        auth = GISAuthManager(config)
+        init_count = 0
+        original_init = auth._initialize_gis
 
-            def counting_init():
-                nonlocal init_count
-                init_count += 1
-                auth._gis = MagicMock()
-                auth._init_strategy = 1
+        def counting_init():
+            nonlocal init_count
+            init_count += 1
+            auth._gis = MagicMock()
+            auth._init_strategy = 1
 
-            auth._initialize_gis = counting_init
+        auth._initialize_gis = counting_init
 
-            cache_clear_count = 0
+        cache_clear_count = 0
 
-            def counting_clear():
-                nonlocal cache_clear_count
-                cache_clear_count += 1
+        def counting_clear():
+            nonlocal cache_clear_count
+            cache_clear_count += 1
 
-            # Fire 5 concurrent refreshes
-            await asyncio.gather(
-                auth.refresh(counting_clear),
-                auth.refresh(counting_clear),
-                auth.refresh(counting_clear),
-                auth.refresh(counting_clear),
-                auth.refresh(counting_clear),
-            )
+        # Fire 5 concurrent refreshes
+        await asyncio.gather(
+            auth.refresh(counting_clear),
+            auth.refresh(counting_clear),
+            auth.refresh(counting_clear),
+            auth.refresh(counting_clear),
+            auth.refresh(counting_clear),
+        )
 
-            # Due to asyncio.Lock, they serialize — each one runs init
-            # But critically, they don't race or crash
-            assert init_count == 5  # Lock serializes, doesn't deduplicate
-            assert auth.gis is not None
+        # Due to asyncio.Lock, they serialize — each one runs init
+        # But critically, they don't race or crash
+        assert init_count == 5  # Lock serializes, doesn't deduplicate
+        assert auth.gis is not None

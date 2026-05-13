@@ -38,6 +38,14 @@ class ServerConfig(BaseSettings):
     layer_cache_max_size: int = 100
     default_max_results: int = 200
 
+    # ── Logging ──────────────────────────────────────────────────────────
+    log_level: str = "INFO"
+    log_format: str = "text"
+
+    # ── Timeouts ─────────────────────────────────────────────────────────
+    http_timeout: int = 30
+    auth_timeout: int = 30
+
     # ── Tool management ──────────────────────────────────────────────────
     # Stored as str in env (comma-separated), converted to list by validator.
     tools_disabled: str = ""

@@ -11,12 +11,13 @@ Thread-safe token refresh via asyncio.Lock.
 
 import asyncio
 import logging
-import os
 from typing import List, Optional
 from urllib.parse import urlparse
 
 import requests as _requests
 from arcgis.gis import GIS
+
+from mcp_arcgis_server.config import ServerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -24,42 +25,21 @@ logger = logging.getLogger(__name__)
 class GISAuthManager:
     """Manages ArcGIS GIS instance lifecycle and authentication."""
 
-    def __init__(self, config=None) -> None:
+    def __init__(self, config: ServerConfig) -> None:
         self._gis: Optional[GIS] = None
         self._arcgis_hostname: str = ""
         self._verify_ssl: bool = True
         self._init_strategy: int = 0
         self._refresh_lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
+        self._config = config
 
-        # Read from config if provided, else fall back to env vars
-        if config is not None:
-            self._portal_url = config.portal_url
-            self._username = config.username
-            self._password = config.password
-            self._verify_ssl = config.verify_ssl
-            self._token_url = config.token_url
-            self._server_url = config.server_url
-        else:
-            # Resolve portal URL
-            self._portal_url = os.getenv("ARCGIS_PORTAL_URL", "")
-            if not self._portal_url:
-                legacy_url = os.getenv("ARCGIS_URL", "")
-                if legacy_url:
-                    logger.warning(
-                        "ARCGIS_URL is deprecated, use ARCGIS_PORTAL_URL instead"
-                    )
-                    self._portal_url = legacy_url
-
-            self._username = os.getenv("ARCGIS_USERNAME", "")
-            self._password = os.getenv("ARCGIS_PASSWORD", "")
-            self._verify_ssl = os.getenv("ARCGIS_VERIFY_SSL", "true").lower() not in (
-                "false",
-                "0",
-                "no",
-            )
-            self._token_url = os.getenv("ARCGIS_TOKEN_URL", "")
-            self._server_url = os.getenv("ARCGIS_SERVER_URL", "")
+        self._portal_url = config.portal_url
+        self._username = config.username
+        self._password = config.password
+        self._verify_ssl = config.verify_ssl
+        self._token_url = config.token_url
+        self._server_url = config.server_url
 
         # Extract hostname for domain-based auth routing
         if self._portal_url:
@@ -260,7 +240,7 @@ class GISAuthManager:
                         url,
                         data=data,
                         verify=self._verify_ssl,
-                        timeout=30,
+                        timeout=self._config.auth_timeout,
                     )
                     result = resp.json()
                     if "token" in result and result["token"]:

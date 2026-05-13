@@ -14,12 +14,62 @@ from ..arcgis.client import ArcGISClient
 from ..arcgis.geometry import (
     UNIT_TO_METERS,
     compute_distance,
+    get_centroid,
     normalize_geometry,
 )
 from ._base import ensure_geometry_dict
 from ._registry import register_tool
 
 logger = logging.getLogger(__name__)
+
+
+def _create_proximity_lines(
+    source_geometry: Dict[str, Any],
+    near_features: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Create proximity line features connecting source to each near feature.
+
+    Computes distance from line coordinates (source centroid to target centroid)
+    in feet and stores in feature attributes.
+
+    Args:
+        source_geometry: Source geometry (ArcGIS JSON).
+        near_features: List of near features with geometry and attributes.
+
+    Returns:
+        List of line features with geometry and distance attributes.
+    """
+    source_centroid = get_centroid(source_geometry)
+    proximity_lines = []
+
+    for idx, feat in enumerate(near_features):
+        target_geom = feat.get("geometry")
+        if not target_geom:
+            continue
+
+        target_centroid = get_centroid(target_geom)
+
+        # Compute distance in feet
+        distance_feet = compute_distance(source_centroid, target_centroid, unit="feet")
+
+        # Create line geometry
+        line_geom = {
+            "paths": [[[source_centroid["x"], source_centroid["y"]],
+                       [target_centroid["x"], target_centroid["y"]]]],
+            "spatialReference": source_centroid.get("spatialReference", {"wkid": 4326}),
+        }
+
+        # Create line feature with distance in attributes
+        proximity_lines.append({
+            "geometry": line_geom,
+            "attributes": {
+                "distance": round(distance_feet, 2),
+                "distance_unit": "feet",
+                "target_id": idx,
+            },
+        })
+
+    return proximity_lines
 
 
 @register_tool(
@@ -35,13 +85,14 @@ async def find_nearby(
     unit: Annotated[str, Field(description="Distance unit: feet, meters, kilometers, or miles")] = "miles",
     where: Annotated[str, Field(description="SQL WHERE clause to filter features")] = "1=1",
     out_fields: Annotated[str, Field(description="Comma-separated field list for returned attributes")] = "*",
-    max_results: Annotated[int, Field(description="Maximum number of nearest features to return")] = 20,
+    max_results: Annotated[int, Field(description="Maximum number of nearest features to return")] = 10,
 ) -> Dict[str, Any]:
     """Find features near a geometry, sorted by distance.
 
     Searches a feature layer for features within a radius of the given
-    geometry. Returns features sorted by distance (nearest first), each
-    enriched with computed geodesic distance from the input geometry's centroid.
+    geometry. Returns a normalized multi-layer response with buffer geometry,
+    near features in standard FeatureSet format, and proximity lines with
+    distance in feet.
     """
     try:
         geometry_dict = ensure_geometry_dict(geometry)
@@ -74,32 +125,37 @@ async def find_nearby(
 
         features = query_result.get("features", [])
 
-        await ctx.report_progress(3, 4, message="Computing distances")
-        enriched: List[Dict[str, Any]] = []
+        # Sort features by distance (for consistent ordering)
+        await ctx.report_progress(3, 4, message="Sorting features by distance")
+        source_centroid = get_centroid(arcgis_geom)
+        features_with_dist = []
         for feat in features:
             geom = feat.get("geometry")
             if geom:
-                dist = compute_distance(arcgis_geom, geom, unit=unit)
+                dist = compute_distance(source_centroid, geom, unit="feet")
             else:
-                dist = None
-            enriched.append({
-                "attributes": feat.get("attributes", {}),
-                "geometry": geom,
-                "distance": round(dist, 4) if dist is not None else None,
-                "distance_unit": unit,
-            })
+                dist = float("inf")
+            features_with_dist.append((dist, feat))
 
-        enriched.sort(key=lambda f: f["distance"] if f["distance"] is not None else float("inf"))
-        enriched = enriched[:max_results]
+        features_with_dist.sort(key=lambda x: x[0])
+        sorted_features = [feat for _, feat in features_with_dist[:max_results]]
 
-        await ctx.report_progress(4, 4, message="Results sorted by distance")
+        # Create proximity lines with distance in feet
+        proximity_lines = _create_proximity_lines(arcgis_geom, sorted_features)
+
+        await ctx.report_progress(4, 4, message="Response complete")
         return {
-            "features": enriched,
-            "count": len(enriched),
+            "buffer_geometry": buffered,
+            "near_features": sorted_features,
+            "proximity_lines": proximity_lines,
+            "count": len(sorted_features),
             "total_in_radius": len(features),
             "search_radius": radius,
             "search_unit": unit,
             "layer_url": layer_url,
+            "geometryType": query_result.get("geometryType", "esriGeometryPoint"),
+            "spatialReference": query_result.get("spatialReference", {"wkid": 4326}),
+            "fields": query_result.get("fields", []),
         }
     except Exception as e:
         logger.error("find_nearby error: %s", e, exc_info=True)

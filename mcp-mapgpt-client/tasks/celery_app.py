@@ -3,14 +3,14 @@ Celery configuration for background tasks.
 Migrated from app/tasks/celery_app.py.
 """
 
-import os
-
 from celery import Celery
+
+from core.config import settings
 
 celery_app = Celery(
     "mapgpt",
-    broker=os.getenv("CELERY_BROKER_URL", "redis://redis:6379/1"),
-    backend=os.getenv("CELERY_RESULT_BACKEND", "redis://redis:6379/2"),
+    broker=settings.celery_broker_url,
+    backend=settings.celery_result_backend,
 )
 
 celery_app.conf.update(

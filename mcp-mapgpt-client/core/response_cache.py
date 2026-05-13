@@ -4,14 +4,14 @@ Feedback-driven response cache — Redis-backed with promoted-entry eviction pro
 
 import json
 import logging
-import os
 from typing import Any, Dict, Optional
 
+from core.config import settings
 from core.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
-SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "7200"))
+SESSION_TTL = settings.session_ttl_seconds
 DEFAULT_CACHE_TTL = 86400  # 1 day
 PROMOTED_CACHE_TTL = 864000  # 10 days
 

@@ -3,15 +3,15 @@ Session management — Redis-backed session store with sliding TTL.
 """
 
 import logging
-import os
 import time
 from typing import Optional
 
+from core.config import settings
 from core.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
-SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "7200"))
+SESSION_TTL = settings.session_ttl_seconds
 
 
 class SessionManager:

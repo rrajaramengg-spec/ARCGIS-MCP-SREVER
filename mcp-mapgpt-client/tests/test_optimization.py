@@ -22,7 +22,7 @@ class TestRagUnifiedSearchIntegration:
     """Integration tests calling rag_unified_search() against a live DB.
 
     Requires DATABASE_URL env var pointing to a postgres+pgvector database
-    with the stored function deployed (alembic migration 004).
+    with the stored function deployed from the public baseline migration.
     Skip if DATABASE_URL is not set.
     """
 
@@ -34,7 +34,7 @@ class TestRagUnifiedSearchIntegration:
     @pytest_asyncio.fixture
     async def session(self):
         from core.rag.database.connection import init_db, async_session_factory, close_db
-        init_db()
+        init_db(os.getenv("DATABASE_URL"))
         async with async_session_factory() as s:
             yield s
         await close_db()
@@ -320,55 +320,47 @@ class TestLLMServiceJsonMode:
     """Tests for LLMService.complete() json_mode parameter."""
 
     @pytest.mark.asyncio
-    async def test_json_mode_sets_response_format(self):
+    async def test_json_mode_sets_response_format(self, mock_config):
         """json_mode=True should set response_format in the API call."""
-        with patch.dict("os.environ", {
-            "AZURE_OPENAI_API_KEY": "test",
-            "AZURE_OPENAI_ENDPOINT": "https://test.openai.azure.com",
-        }):
-            from core.llm_service import LLMService
+        from core.llm_service import LLMService
 
-            svc = LLMService()
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = '{"action": "query"}'
-            mock_response.choices[0].message.tool_calls = None
+        svc = LLMService(mock_config)
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = '{"action": "query"}'
+        mock_response.choices[0].message.tool_calls = None
 
-            svc._client.chat.completions.create = AsyncMock(
-                return_value=mock_response
-            )
+        svc._client.chat.completions.create = AsyncMock(
+            return_value=mock_response
+        )
 
-            await svc.complete(
-                [{"role": "user", "content": "test"}],
-                json_mode=True,
-            )
+        await svc.complete(
+            [{"role": "user", "content": "test"}],
+            json_mode=True,
+        )
 
-            call_kwargs = svc._client.chat.completions.create.call_args[1]
-            assert call_kwargs["response_format"] == {"type": "json_object"}
+        call_kwargs = svc._client.chat.completions.create.call_args[1]
+        assert call_kwargs["response_format"] == {"type": "json_object"}
 
     @pytest.mark.asyncio
-    async def test_json_mode_default_false(self):
+    async def test_json_mode_default_false(self, mock_config):
         """Default call should NOT include response_format."""
-        with patch.dict("os.environ", {
-            "AZURE_OPENAI_API_KEY": "test",
-            "AZURE_OPENAI_ENDPOINT": "https://test.openai.azure.com",
-        }):
-            from core.llm_service import LLMService
+        from core.llm_service import LLMService
 
-            svc = LLMService()
-            mock_response = MagicMock()
-            mock_response.choices = [MagicMock()]
-            mock_response.choices[0].message.content = "Hello"
-            mock_response.choices[0].message.tool_calls = None
+        svc = LLMService(mock_config)
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message.content = "Hello"
+        mock_response.choices[0].message.tool_calls = None
 
-            svc._client.chat.completions.create = AsyncMock(
-                return_value=mock_response
-            )
+        svc._client.chat.completions.create = AsyncMock(
+            return_value=mock_response
+        )
 
-            await svc.complete([{"role": "user", "content": "test"}])
+        await svc.complete([{"role": "user", "content": "test"}])
 
-            call_kwargs = svc._client.chat.completions.create.call_args[1]
-            assert "response_format" not in call_kwargs
+        call_kwargs = svc._client.chat.completions.create.call_args[1]
+        assert "response_format" not in call_kwargs
 
 
 # ---------------------------------------------------------------------------
@@ -438,6 +430,9 @@ class TestNoDoubleExecution:
         mock_mcp.call_tool = AsyncMock(return_value={"features": []})
 
         mock_llm = MagicMock()
+        mock_llm.complete = AsyncMock(return_value=MagicMock(
+            content='{"action":"query","query":[{"type":"where","layer":"TEST","layer_url":"http://test/0","where":"1=1"}],"message":"test"}',
+        ))
 
         handler = QueryHandler(
             mcp=mock_mcp,
@@ -452,14 +447,22 @@ class TestNoDoubleExecution:
         )
 
         # Patch plan() to return a query plan directly
-        handler.plan = AsyncMock(return_value={
+        plan_result = {
             "action": "query",
-            "query": [{"type": "where", "layer": "TEST", "layer_url": "http://test/0"}],
+            "query": [{"type": "where", "layer": "TEST", "layer_url": "http://test/0", "where": "1=1"}],
             "message": "test",
-        })
+        }
+        handler._plan_from_context = AsyncMock(return_value=plan_result)
         handler._last_rag_layers = []
 
-        await handler.execute("test query")
+        # Patch build_rag_context so execute() doesn't need a DB
+        with patch("core.orchestrator.query_handler.build_rag_context", new_callable=AsyncMock) as mock_rag, \
+             patch("core.orchestrator.query_handler.ResponseCache") as mock_cache:
+            mock_rag.return_value = ("", [])
+            mock_cache.get = AsyncMock(return_value=None)
+            mock_cache.set = AsyncMock()
+            mock_cache.store_query_mapping = AsyncMock()
+            await handler.execute("test query")
 
         # execute_query_plan called exactly once
         mock_mcp.call_tool.assert_awaited_once()

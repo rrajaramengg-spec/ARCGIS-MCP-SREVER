@@ -19,8 +19,8 @@ def mock_redis():
 
 SIMPLE_PLAN = {
     "action": "query",
-    "query": [{"type": "where", "layer": "STATIONS", "layer_url": "https://example.com/STATIONS", "where": "COUNTY = 'Springfield'"}],
-    "message": "Querying STATIONS in Springfield County",
+    "query": [{"type": "where", "layer": "PSAP", "layer_url": "https://example.com/PSAP", "where": "COUNTY = 'Madison'"}],
+    "message": "Querying PSAP in Madison County",
 }
 
 
@@ -30,7 +30,7 @@ async def test_add_turn(mock_redis):
     with patch("core.history.get_redis", return_value=mock_redis):
         from core.history import ConversationHistory
 
-        result = await ConversationHistory.add_turn("s1", "show STATIONS", SIMPLE_PLAN)
+        result = await ConversationHistory.add_turn("s1", "show psap", SIMPLE_PLAN)
 
     assert result is True
     mock_redis.rpush.assert_called_once()
@@ -38,7 +38,7 @@ async def test_add_turn(mock_redis):
     assert args[0] == "hist:s1"
     user_entry = json.loads(args[1])
     assert user_entry["role"] == "user"
-    assert user_entry["content"] == "show STATIONS"
+    assert user_entry["content"] == "show psap"
     assistant_entry = json.loads(args[2])
     assert assistant_entry["role"] == "assistant"
     # Plan JSON stored, not a message string
@@ -117,7 +117,7 @@ async def test_plan_within_budget_stored_as_is():
     plan_json = _trim_plan(SIMPLE_PLAN)
     plan = json.loads(plan_json)
     assert plan["action"] == "query"
-    assert plan["query"][0]["layer_url"] == "https://example.com/STATIONS"
+    assert plan["query"][0]["layer_url"] == "https://example.com/PSAP"
 
 
 @pytest.mark.asyncio
@@ -161,8 +161,8 @@ async def test_plan_json_stored_not_message(mock_redis):
     with patch("core.history.get_redis", return_value=mock_redis):
         from core.history import ConversationHistory
 
-        plan = {"action": "query", "query": [{"type": "where", "layer": "STATIONS"}], "message": "Querying STATIONS"}
-        await ConversationHistory.add_turn("s1", "show STATIONS", plan)
+        plan = {"action": "query", "query": [{"type": "where", "layer": "PSAP"}], "message": "Querying PSAP"}
+        await ConversationHistory.add_turn("s1", "show psap", plan)
 
     args = mock_redis.rpush.call_args[0]
     assistant_entry = json.loads(args[2])
@@ -175,7 +175,7 @@ async def test_plan_json_stored_not_message(mock_redis):
 async def test_compare_contrast_three_turns(mock_redis):
     """Three turns of history enable compare/contrast pattern."""
     turns_data = []
-    for i, q in enumerate(["show STATIONS in Springfield", "show parks", "compare with first"]):
+    for i, q in enumerate(["show psap in madison", "show fire stations", "compare with first"]):
         turns_data.append(json.dumps({"role": "user", "content": q}))
         turns_data.append(json.dumps({"role": "assistant", "content": json.dumps({"action": "query", "query": [{"layer": f"L{i}"}]})}))
     mock_redis.lrange.return_value = turns_data
@@ -186,5 +186,5 @@ async def test_compare_contrast_three_turns(mock_redis):
         turns = await ConversationHistory.get_turns("s1")
 
     assert len(turns) == 6
-    assert turns[0]["content"] == "show STATIONS in Springfield"  # Q1 still available at Q3
+    assert turns[0]["content"] == "show psap in madison"  # Q1 still available at Q3
     assert turns[4]["content"] == "compare with first"

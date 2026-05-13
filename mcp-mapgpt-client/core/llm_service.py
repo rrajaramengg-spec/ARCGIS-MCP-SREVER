@@ -5,11 +5,12 @@ Wraps openai.AsyncAzureOpenAI for chat completions with tool-calling support.
 
 import json
 import logging
-import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 import openai
+
+from core.config import ClientConfig
 
 logger = logging.getLogger(__name__)
 
@@ -38,14 +39,14 @@ class LLMResponse:
 class LLMService:
     """Service for LLM interactions using Azure OpenAI directly."""
 
-    def __init__(self) -> None:
+    def __init__(self, config: ClientConfig) -> None:
         self._client = openai.AsyncAzureOpenAI(
-            api_key=os.getenv("AZURE_OPENAI_API_KEY", ""),
-            azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT", ""),
-            api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2025-04-01-preview"),
+            api_key=config.azure_openai_api_key,
+            azure_endpoint=config.azure_openai_endpoint,
+            api_version=config.azure_openai_api_version,
         )
-        self._deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT", "gpt-5-mini")
-        self._max_tokens = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+        self._deployment = config.azure_openai_deployment
+        self._max_tokens = config.llm_max_tokens
 
         logger.info(
             "LLMService initialised — deployment=%s",

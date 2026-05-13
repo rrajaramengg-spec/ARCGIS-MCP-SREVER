@@ -129,3 +129,56 @@ class TestServerConfigValidation:
         with patch.dict(os.environ, {"ARCGIS_THREAD_POOL_MAX_WORKERS": "abc"}, clear=True):
             with pytest.raises(ValidationError):
                 ServerConfig()
+
+
+class TestServerConfigTimeouts:
+    """Verify http_timeout and auth_timeout fields."""
+
+    def test_default_http_timeout(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = ServerConfig()
+        assert config.http_timeout == 30
+
+    def test_default_auth_timeout(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = ServerConfig()
+        assert config.auth_timeout == 30
+
+    def test_custom_http_timeout(self):
+        with patch.dict(os.environ, {"ARCGIS_HTTP_TIMEOUT": "60"}, clear=True):
+            config = ServerConfig()
+        assert config.http_timeout == 60
+
+    def test_custom_auth_timeout(self):
+        with patch.dict(os.environ, {"ARCGIS_AUTH_TIMEOUT": "45"}, clear=True):
+            config = ServerConfig()
+        assert config.auth_timeout == 45
+
+    def test_invalid_http_timeout_rejected(self):
+        with patch.dict(os.environ, {"ARCGIS_HTTP_TIMEOUT": "abc"}, clear=True):
+            with pytest.raises(ValidationError):
+                ServerConfig()
+
+
+class TestServerConfigLogFormat:
+    """Verify log_level and log_format fields."""
+
+    def test_default_log_level(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = ServerConfig()
+        assert config.log_level == "INFO"
+
+    def test_default_log_format(self):
+        with patch.dict(os.environ, {}, clear=True):
+            config = ServerConfig()
+        assert config.log_format == "text"
+
+    def test_custom_log_level(self):
+        with patch.dict(os.environ, {"ARCGIS_LOG_LEVEL": "DEBUG"}, clear=True):
+            config = ServerConfig()
+        assert config.log_level == "DEBUG"
+
+    def test_json_log_format(self):
+        with patch.dict(os.environ, {"ARCGIS_LOG_FORMAT": "json"}, clear=True):
+            config = ServerConfig()
+        assert config.log_format == "json"

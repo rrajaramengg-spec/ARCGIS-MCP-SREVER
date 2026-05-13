@@ -1,31 +1,51 @@
 """
 MapGPT Orchestrator — modular handler architecture with dynamic dispatch.
 
-Public API: Orchestrator (identical interface to the original monolith).
-Handlers register via @register_handler and are instantiated with explicit DI.
+Public API: MapGPTOrchestrator (identical interface to the original monolith).
+Handlers register via @register_handler and are auto-discovered at init time.
 """
 
+import importlib
 import logging
+import pkgutil
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 import yaml
 
+from core.config import ClientConfig
 from core.llm_service import LLMService
 from core.mcp_client import MCPClient
 
 from .base import _HANDLER_REGISTRY, BaseHandler
 
-# ── Import all handler modules to trigger @register_handler decorators ────
-from . import (  # noqa: F401
-    arcgis_execute_handler,
-    locate_handler,
-    query_handler,
-    summarize_handler,
-    summarize_stat_handler,
-)
-
 logger = logging.getLogger(__name__)
+
+
+def _auto_import_handler_modules() -> None:
+    """Auto-import handler modules to trigger @register_handler decorators.
+
+    Walks core.orchestrator package and imports all public modules.
+    Modules with ``_``-prefixed names (e.g. ``_actions/``) are skipped.
+    Import errors are logged as warnings without crashing startup.
+    """
+    import core.orchestrator as pkg
+
+    base_prefix = pkg.__name__ + "."
+    for _, modname, _ in pkgutil.walk_packages(
+        pkg.__path__, prefix=base_prefix
+    ):
+        # Get the relative path segments after core.orchestrator.
+        relative = modname[len(base_prefix):]
+        parts = relative.split(".")
+        if any(p.startswith("_") for p in parts):
+            continue  # skips _actions/ and any of its children
+        try:
+            importlib.import_module(modname)
+        except Exception:
+            logger.warning(
+                "Failed to import handler module: %s", modname, exc_info=True
+            )
 
 
 def _load_prompts() -> Dict[str, Any]:
@@ -35,19 +55,33 @@ def _load_prompts() -> Dict[str, Any]:
         return yaml.safe_load(f)
 
 
-class Orchestrator:
-    """Orchestrates the query pipeline.
+class MapGPTOrchestrator:
+    """Orchestrates the MapGPT query pipeline.
 
     Delegates to registered handlers discovered via the handler registry.
     Maintains shared state (MCP client, LLM service, prompts, tools cache)
     and injects only the dependencies each handler needs.
     """
 
-    def __init__(self, mcp_client: MCPClient, llm_service: LLMService) -> None:
+    def __init__(self, mcp_client: MCPClient, llm_service: LLMService, rag_service=None, config: Optional[ClientConfig] = None) -> None:
         self._mcp = mcp_client
         self._llm = llm_service
+        self._rag_service = rag_service
+        self._config = config
         self._prompts = _load_prompts()
         self._tools_cache: List[Dict[str, Any]] = []
+
+        # Build graph runtime — always enabled (graph-only pipeline)
+        self._graph_runtime = None
+        try:
+            from core.orchestrator.graph import GraphRuntime, EXECUTOR_MAP
+            self._graph_runtime = GraphRuntime(EXECUTOR_MAP)
+            logger.info("Graph runtime enabled")
+        except Exception:
+            logger.warning("Failed to initialise graph runtime", exc_info=True)
+
+        # Auto-discover handler modules (triggers @register_handler decorators)
+        _auto_import_handler_modules()
 
         # Instantiate registered handlers with explicit DI
         self._handlers: Dict[str, BaseHandler] = {}
@@ -74,8 +108,20 @@ class Orchestrator:
 
     def _create_handler(self, name: str, cls: type) -> BaseHandler:
         """Create a handler instance with the correct dependencies."""
-        # Handlers that need prompts + tools_cache
-        if name in ("query", "arcgis_execute"):
+        # Handlers that need prompts + tools_cache (+ optional rag_service)
+        if name in ("query", "execute_llm"):
+            kwargs = dict(
+                mcp=self._mcp,
+                llm=self._llm,
+                prompts=self._prompts,
+                tools_cache=self._tools_cache,
+                rag_service=self._rag_service,
+            )
+            if name == "query":
+                kwargs["graph_runtime"] = self._graph_runtime
+                kwargs["config"] = self._config
+            return cls(**kwargs)
+        if name == "arcgis_execute":
             return cls(
                 mcp=self._mcp,
                 llm=self._llm,
@@ -95,7 +141,7 @@ class Orchestrator:
             llm=self._llm,
         )
 
-    # ── Public API (identical to original orchestrator) ──────────────────
+    
 
     async def plan(
         self,
@@ -150,6 +196,11 @@ class Orchestrator:
                         query=stripped_query,
                         session_id=session_id,
                     )
+                elif handler_name == "execute_llm":
+                    return await handler.execute_llm(
+                        query=stripped_query,
+                        session_id=session_id,
+                    )
 
         # No prefix matched — default to query handler
         return await self._handlers["query"].execute(
@@ -198,5 +249,15 @@ class Orchestrator:
     ) -> Dict[str, Any]:
         """Direct MCP tool invocation via LLM."""
         return await self._handlers["arcgis_execute"].arcgis_execute(
+            query=query, session_id=session_id
+        )
+
+    async def execute_llm(
+        self,
+        query: str,
+        session_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """RAG-augmented LLM tool-calling execution."""
+        return await self._handlers["execute_llm"].execute_llm(
             query=query, session_id=session_id
         )

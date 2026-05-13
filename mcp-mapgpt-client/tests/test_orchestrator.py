@@ -24,7 +24,7 @@ class TestHandlerRegistry:
     def test_all_handlers_registered(self):
         from core.orchestrator.base import _HANDLER_REGISTRY
 
-        expected = {"query", "locate", "summarize", "summarize_stat", "arcgis_execute"}
+        expected = {"query", "locate", "summarize", "summarize_stat", "arcgis_execute", "execute_llm"}
         assert set(_HANDLER_REGISTRY.keys()) == expected
 
     def test_prefix_metadata(self):
@@ -34,6 +34,7 @@ class TestHandlerRegistry:
         assert _HANDLER_REGISTRY["summarize"]["prefix"] == "/summarize "
         assert _HANDLER_REGISTRY["summarize_stat"]["prefix"] == "/summarize-stat "
         assert _HANDLER_REGISTRY["arcgis_execute"]["prefix"] == "/arcgis-execute "
+        assert _HANDLER_REGISTRY["execute_llm"]["prefix"] == "/execute-llm "
         assert _HANDLER_REGISTRY["query"]["prefix"] is None
 
     def test_duplicate_registration_raises(self):
@@ -121,6 +122,7 @@ class TestRunToolLoop:
     @pytest.mark.asyncio
     async def test_max_iterations_cap(self):
         from core.orchestrator.base import BaseHandler
+        from core.exceptions import QueryPlanError
 
         mock_mcp = MagicMock()
         mock_mcp.call_tool = AsyncMock(return_value={})
@@ -133,13 +135,10 @@ class TestRunToolLoop:
         mock_llm.complete = AsyncMock(return_value=tool_response)
 
         handler = BaseHandler(mock_mcp, mock_llm)
-        result = await handler.run_tool_loop(
-            [{"role": "user", "content": "loop"}], tools=[], max_iterations=3
-        )
-
-        assert result.iterations == 3
-        # initial + 3 re-calls = 4
-        assert mock_llm.complete.call_count == 4
+        with pytest.raises(QueryPlanError, match="exceeded 3 iterations"):
+            await handler.run_tool_loop(
+                [{"role": "user", "content": "loop"}], tools=[], max_iterations=3
+            )
 
     @pytest.mark.asyncio
     async def test_tool_failure_captured(self):
@@ -189,10 +188,10 @@ class TestRunToolLoop:
 
 
 class TestDispatcherRouting:
-    """Tests for execute() prefix routing in Orchestrator."""
+    """Tests for execute() prefix routing in MapGPTOrchestrator."""
 
     def _make_orchestrator(self):
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock()
         mock_mcp.is_connected = True
@@ -206,7 +205,7 @@ class TestDispatcherRouting:
             content=json.dumps({"action": "message", "message": "ok"})
         ))
 
-        return Orchestrator(mock_mcp, mock_llm), mock_mcp, mock_llm
+        return MapGPTOrchestrator(mock_mcp, mock_llm), mock_mcp, mock_llm
 
     def test_prefix_routes_sorted_by_length(self):
         orch, _, _ = self._make_orchestrator()
@@ -239,11 +238,11 @@ class TestExplicitDI:
     """Verify each handler receives only its declared dependencies."""
 
     def test_query_handler_has_prompts_and_cache(self):
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock()
         mock_llm = MagicMock()
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
 
         qh = orch._handlers["query"]
         assert hasattr(qh, "_prompts")
@@ -252,11 +251,11 @@ class TestExplicitDI:
         assert qh._llm is mock_llm
 
     def test_locate_handler_minimal_di(self):
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock()
         mock_llm = MagicMock()
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
 
         lh = orch._handlers["locate"]
         assert lh._mcp is mock_mcp
@@ -266,11 +265,11 @@ class TestExplicitDI:
 
     def test_shared_tools_cache_reference(self):
         """QueryHandler and ArcgisExecuteHandler share the same tools_cache list."""
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock()
         mock_llm = MagicMock()
-        orch = Orchestrator(mock_mcp, mock_llm)
+        orch = MapGPTOrchestrator(mock_mcp, mock_llm)
 
         qh = orch._handlers["query"]
         ah = orch._handlers["arcgis_execute"]

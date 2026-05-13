@@ -76,6 +76,7 @@ class ArcGISClient:
 
     def __init__(self, auth: GISAuthManager, config=None) -> None:
         self._auth = auth
+        self._config = config
         max_workers = 8
         cache_max_size = 100
         if config is not None:
@@ -576,7 +577,7 @@ class ArcGISClient:
                 if token:
                     url += f"&token={token}"
                     req = urllib.request.Request(url)
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=self._config.http_timeout if self._config else 30) as resp:
                 data = _json.loads(resp.read().decode())
             layers = data.get("layers", [])
             return [
@@ -597,11 +598,9 @@ class ArcGISClient:
     # ── Geocoding ───────────────────────────────────────────────────────
 
     def _get_geocode_service_url(self) -> str:
-        """Resolve the geocoding service URL from env or portal properties."""
-        import os
-
-        # Explicit env var takes priority
-        url = os.getenv("ARCGIS_GEOCODE_URL", "")
+        """Resolve the geocoding service URL from config or portal properties."""
+        # Explicit config takes priority
+        url = self._config.geocode_url if self._config else ""
         if url:
             return url.rstrip("/")
 
@@ -633,6 +632,9 @@ class ArcGISClient:
             return gis._con.token
         return None
 
+    # Esri World Geocoding Service URL (public, no token needed for findAddressCandidates)
+    _WORLD_GEOCODE_URL = "https://geocode.arcgis.com/arcgis/rest/services/World/GeocodeServer"
+
     async def geocode(
         self,
         address: str,
@@ -644,6 +646,9 @@ class ArcGISClient:
         Uses direct REST calls to the geocoding service, bypassing
         the arcgis SDK's geocode function to avoid service-discovery hangs
         and thread-pool token issues.
+
+        Falls back to the Esri World Geocoding Service if the primary
+        (enterprise) geocoder returns zero candidates.
 
         Args:
             address: Address string to geocode.
@@ -664,22 +669,32 @@ class ArcGISClient:
 
         geocode_url = self._get_geocode_service_url()
 
-        def _geocode() -> List[Dict[str, Any]]:
+        def _do_geocode(svc_url: str, use_token: bool = True) -> List[Dict[str, Any]]:
             params: Dict[str, Any] = {
                 "SingleLine": address,
                 "f": "json",
                 "outSR": out_sr,
                 "maxLocations": max_results,
+                "outFields": "*",
+                "matchOutOfRange": "true",
             }
-            token = self._get_token()
-            if token:
-                params["token"] = token
+            if use_token:
+                token = self._get_token()
+                if token:
+                    params["token"] = token
+
+            url = f"{svc_url}/findAddressCandidates"
+            logger.debug(
+                "Geocode request — url=%s params=%s",
+                url,
+                {k: v for k, v in params.items() if k != "token"},
+            )
 
             resp = _requests.get(
-                f"{geocode_url}/findAddressCandidates",
+                url,
                 params=params,
-                verify=self._auth._verify_ssl,
-                timeout=30,
+                verify=self._auth._verify_ssl if use_token else True,
+                timeout=self._config.http_timeout if self._config else 30,
             )
             resp.raise_for_status()
             data = resp.json()
@@ -688,6 +703,12 @@ class ArcGISClient:
                 raise Exception(str(data["error"]))
 
             candidates = data.get("candidates", [])
+            logger.info(
+                "Geocode result — address=%s candidates=%d svc=%s",
+                address[:80],
+                len(candidates),
+                svc_url.split("/")[-1] if "/" in svc_url else svc_url,
+            )
             return [
                 {
                     "score": c.get("score"),
@@ -698,6 +719,36 @@ class ArcGISClient:
                 }
                 for c in candidates
             ]
+
+        def _geocode() -> List[Dict[str, Any]]:
+            # Try primary (enterprise) geocoder first
+            try:
+                candidates = _do_geocode(geocode_url, use_token=True)
+                if candidates:
+                    return candidates
+            except Exception as primary_exc:
+                logger.warning(
+                    "Primary geocoder failed for address=%s: %s",
+                    address[:80],
+                    str(primary_exc)[:200],
+                )
+                candidates = []
+
+            # Fallback to Esri World Geocoding Service
+            if geocode_url.rstrip("/") != self._WORLD_GEOCODE_URL:
+                logger.info(
+                    "Falling back to Esri World Geocoding Service for address=%s",
+                    address[:80],
+                )
+                try:
+                    return _do_geocode(self._WORLD_GEOCODE_URL, use_token=False)
+                except Exception as fallback_exc:
+                    logger.warning(
+                        "World Geocoding Service fallback failed: %s",
+                        fallback_exc,
+                    )
+
+            return candidates
 
         loop = asyncio.get_running_loop()
         try:
@@ -763,7 +814,7 @@ class ArcGISClient:
                 f"{geocode_url}/reverseGeocode",
                 params=params,
                 verify=self._auth._verify_ssl,
-                timeout=30,
+                timeout=self._config.http_timeout if self._config else 30,
             )
             resp.raise_for_status()
             data = resp.json()

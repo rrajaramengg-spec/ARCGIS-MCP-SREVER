@@ -22,6 +22,12 @@ async def build_rag_context(query: str) -> Tuple[str, List[Dict[str, Any]]]:
         The raw layers list is used for post-plan validation guardrails.
     """
     context = await retrieve_context(query)
+    logger.debug(
+        "RAG retrieval — %d layers, %d patterns for query=%s",
+        len(context["layers"]),
+        len(context["patterns"]),
+        query[:100],
+    )
 
     layer_section = format_layer_context(context["layers"])
     pattern_section = format_pattern_context(context["patterns"])

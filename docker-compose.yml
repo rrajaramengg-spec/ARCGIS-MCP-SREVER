@@ -2,11 +2,11 @@ services:
   # PostgreSQL with pgvector
   postgres:
     image: pgvector/pgvector:pg16
-    container_name: arcgis-mcp-postgres
+    container_name: mapgpt-postgres
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: gisdb
+      POSTGRES_USER: ${POSTGRES_USER:-mapgpt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+      POSTGRES_DB: ${POSTGRES_DB:-mapgpt}
     ports:
       - "5432:5432"
     volumes:
@@ -20,7 +20,7 @@ services:
   # Redis for caching
   redis:
     image: redis:7-alpine
-    container_name: arcgis-mcp-redis
+    container_name: mapgpt-redis
     ports:
       - "6379:6379"
     volumes:
@@ -31,18 +31,18 @@ services:
       timeout: 5s
       retries: 5
 
-  # MCP Client (REST API + MCP host)
+  # MCP MapGPT Client (REST API + MCP host)
   mcp-mapgpt-client:
     build:
       context: .
       dockerfile: Dockerfile.mcp-mapgpt
-    container_name: arcgis-mcp-client
+    container_name: mapgpt-mcp-client
     ports:
       - "8002:8002"
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/gisdb
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mapgpt}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-mapgpt}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -74,11 +74,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.mcp-mapgpt
-    container_name: arcgis-mcp-celery-worker
+    container_name: mapgpt-celery-worker
     env_file:
       - .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/gisdb
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-mapgpt}:${POSTGRES_PASSWORD:-change-me}@postgres:5432/${POSTGRES_DB:-mapgpt}
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/1
       CELERY_RESULT_BACKEND: redis://redis:6379/2
@@ -91,17 +91,17 @@ services:
     command: celery -A tasks.celery_app worker --loglevel=info
 
   # Web Chat UI (demo only)
-  webchat-ui:
+  mapgpt-webchat-ui:
     build:
       context: .
       dockerfile: Dockerfile.webchat
-    container_name: arcgis-mcp-webchat
+    container_name: mapgpt-webchat
     ports:
       - "8080:8080"
     env_file:
       - .env
     environment:
-      GIS_CLIENT_URL: http://mcp-mapgpt-client:8002
+      MAPGPT_CLIENT_URL: http://mcp-mapgpt-client:8002
     depends_on:
       mcp-mapgpt-client:
         condition: service_healthy

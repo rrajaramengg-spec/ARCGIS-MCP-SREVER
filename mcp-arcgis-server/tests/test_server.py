@@ -4,9 +4,9 @@ Tests ArcGISClient domain-based routing, FeatureSet conversion, MCP tool shapes,
 and registry-based tool discovery.
 """
 
-import os
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
+from mcp_arcgis_server.config import ServerConfig
 
 
 # ---------------------------------------------------------------------------
@@ -19,92 +19,70 @@ class TestArcGISClient:
 
     def test_internal_url_gets_gis(self):
         """Internal URL matching portal domain gets authenticated FeatureLayer."""
-        env = {
-            "ARCGIS_PORTAL_URL": "https://arcgis.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS") as mock_gis_cls:
-                mock_gis_cls.return_value = MagicMock()
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+        config = ServerConfig(
+            portal_url="https://arcgis.example.com/arcgis",
+            username="user",
+            password="pass",
+        )
+        with patch("mcp_arcgis_server.arcgis.auth.GIS") as mock_gis_cls:
+            mock_gis_cls.return_value = MagicMock()
+            with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+                from mcp_arcgis_server.arcgis.auth import GISAuthManager
+                from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    # Simulate successful init
-                    auth._gis = mock_gis_cls.return_value
-                    client = ArcGISClient(auth)
-                    client._get_feature_layer(
-                        "https://arcgis.example.com/server/rest/services/Svc/MapServer/0"
-                    )
-                    mock_fl_cls.assert_called_once()
-                    call_kwargs = mock_fl_cls.call_args
-                    assert call_kwargs[1].get("gis") is not None
+                auth = GISAuthManager(config)
+                # Simulate successful init
+                auth._gis = mock_gis_cls.return_value
+                client = ArcGISClient(auth, config)
+                client._get_feature_layer(
+                    "https://arcgis.example.com/server/rest/services/Svc/MapServer/0"
+                )
+                mock_fl_cls.assert_called_once()
+                call_kwargs = mock_fl_cls.call_args
+                assert call_kwargs[1].get("gis") is not None
 
     def test_external_url_no_gis(self):
         """External URL gets anonymous FeatureLayer (no GIS)."""
-        env = {
-            "ARCGIS_PORTAL_URL": "https://arcgis.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+        config = ServerConfig(
+            portal_url="https://arcgis.example.com/arcgis",
+            username="user",
+            password="pass",
+        )
+        with patch("mcp_arcgis_server.arcgis.auth.GIS"):
+            with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+                from mcp_arcgis_server.arcgis.auth import GISAuthManager
+                from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    client = ArcGISClient(auth)
-                    client._get_feature_layer(
-                        "https://services.arcgis.com/public/FeatureServer/0"
-                    )
-                    mock_fl_cls.assert_called_once_with(
-                        "https://services.arcgis.com/public/FeatureServer/0"
-                    )
+                auth = GISAuthManager(config)
+                client = ArcGISClient(auth, config)
+                client._get_feature_layer(
+                    "https://services.arcgis.com/public/FeatureServer/0"
+                )
+                mock_fl_cls.assert_called_once_with(
+                    "https://services.arcgis.com/public/FeatureServer/0"
+                )
 
     def test_case_insensitive_hostname(self):
         """Hostname comparison is case-insensitive."""
-        env = {
-            "ARCGIS_PORTAL_URL": "https://ARCGIS.Example.COM/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        config = ServerConfig(
+            portal_url="https://ARCGIS.Example.COM/arcgis",
+            username="user",
+            password="pass",
+        )
+        from mcp_arcgis_server.arcgis.auth import GISAuthManager
 
-                auth = GISAuthManager()
-                assert auth.is_internal_url(
-                    "https://arcgis.example.com/server/rest/layer/0"
-                )
+        auth = GISAuthManager(config)
+        assert auth.is_internal_url(
+            "https://arcgis.example.com/server/rest/layer/0"
+        )
 
     def test_no_portal_url(self):
         """No portal URL configured — all URLs treated as external."""
-        with patch.dict(os.environ, {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""}, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                from mcp_arcgis_server.arcgis.auth import GISAuthManager
+        config = ServerConfig(portal_url="")
+        from mcp_arcgis_server.arcgis.auth import GISAuthManager
 
-                auth = GISAuthManager()
-                assert not auth.is_internal_url("https://any.server.com/layer/0")
-
-    def test_legacy_arcgis_url_fallback(self):
-        """Legacy ARCGIS_URL falls back with deprecation."""
-        env = {
-            "ARCGIS_PORTAL_URL": "",
-            "ARCGIS_URL": "https://legacy.example.com/arcgis",
-            "ARCGIS_USERNAME": "user",
-            "ARCGIS_PASSWORD": "pass",
-        }
-        with patch.dict(os.environ, env, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                from mcp_arcgis_server.arcgis.auth import GISAuthManager
-
-                auth = GISAuthManager()
-                assert auth.is_internal_url(
-                    "https://legacy.example.com/server/rest/services/Svc/MapServer/0"
-                )
+        auth = GISAuthManager(config)
+        assert not auth.is_internal_url("https://any.server.com/layer/0")
 
 
 class TestFeatureSetConversion:
@@ -208,35 +186,33 @@ class TestFeatureLayerCaching:
 
     def test_same_url_returns_cached_instance(self):
         """Repeated calls with same URL return the same FeatureLayer."""
-        with patch.dict(os.environ, {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""}, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    mock_fl_cls.return_value = MagicMock()
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+        config = ServerConfig(portal_url="")
+        with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+            mock_fl_cls.return_value = MagicMock()
+            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+            from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    client = ArcGISClient(auth)
-                    fl1 = client._get_feature_layer("https://test/layer/0")
-                    fl2 = client._get_feature_layer("https://test/layer/0")
-                    assert fl1 is fl2
-                    assert mock_fl_cls.call_count == 1
+            auth = GISAuthManager(config)
+            client = ArcGISClient(auth, config)
+            fl1 = client._get_feature_layer("https://test/layer/0")
+            fl2 = client._get_feature_layer("https://test/layer/0")
+            assert fl1 is fl2
+            assert mock_fl_cls.call_count == 1
 
     def test_different_urls_create_separate_instances(self):
         """Different URLs create separate FeatureLayer instances."""
-        with patch.dict(os.environ, {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""}, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    mock_fl_cls.side_effect = [MagicMock(), MagicMock()]
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+        config = ServerConfig(portal_url="")
+        with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+            mock_fl_cls.side_effect = [MagicMock(), MagicMock()]
+            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+            from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    client = ArcGISClient(auth)
-                    fl1 = client._get_feature_layer("https://test/layer/0")
-                    fl2 = client._get_feature_layer("https://test/layer/1")
-                    assert fl1 is not fl2
-                    assert mock_fl_cls.call_count == 2
+            auth = GISAuthManager(config)
+            client = ArcGISClient(auth, config)
+            fl1 = client._get_feature_layer("https://test/layer/0")
+            fl2 = client._get_feature_layer("https://test/layer/1")
+            assert fl1 is not fl2
+            assert mock_fl_cls.call_count == 2
 
 
 class TestResultCap:
@@ -245,72 +221,69 @@ class TestResultCap:
     @pytest.mark.asyncio
     async def test_default_cap_2000(self):
         """No result_record_count specified defaults to 2000."""
-        with patch.dict(os.environ, {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""}, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    mock_fl = MagicMock()
-                    mock_fs = MagicMock()
-                    mock_fs.features = []
-                    mock_fs.to_dict.return_value = {"features": []}
-                    mock_fl.query.return_value = mock_fs
-                    mock_fl_cls.return_value = mock_fl
+        config = ServerConfig(portal_url="")
+        with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+            mock_fl = MagicMock()
+            mock_fs = MagicMock()
+            mock_fs.features = []
+            mock_fs.to_dict.return_value = {"features": []}
+            mock_fl.query.return_value = mock_fs
+            mock_fl_cls.return_value = mock_fl
 
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+            from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    client = ArcGISClient(auth)
-                    await client.query_layer("https://test/layer/0")
-                    call_kwargs = mock_fl.query.call_args[1]
-                    assert call_kwargs["result_record_count"] == 2000
+            auth = GISAuthManager(config)
+            client = ArcGISClient(auth, config)
+            await client.query_layer("https://test/layer/0")
+            call_kwargs = mock_fl.query.call_args[1]
+            assert call_kwargs["result_record_count"] == 2000
 
     @pytest.mark.asyncio
     async def test_cap_exceeding_value(self):
         """result_record_count > 2000 is capped to 2000."""
-        with patch.dict(os.environ, {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""}, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    mock_fl = MagicMock()
-                    mock_fs = MagicMock()
-                    mock_fs.features = []
-                    mock_fs.to_dict.return_value = {"features": []}
-                    mock_fl.query.return_value = mock_fs
-                    mock_fl_cls.return_value = mock_fl
+        config = ServerConfig(portal_url="")
+        with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+            mock_fl = MagicMock()
+            mock_fs = MagicMock()
+            mock_fs.features = []
+            mock_fs.to_dict.return_value = {"features": []}
+            mock_fl.query.return_value = mock_fs
+            mock_fl_cls.return_value = mock_fl
 
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+            from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    client = ArcGISClient(auth)
-                    await client.query_layer(
-                        "https://test/layer/0", result_record_count=5000
-                    )
-                    call_kwargs = mock_fl.query.call_args[1]
-                    assert call_kwargs["result_record_count"] == 2000
+            auth = GISAuthManager(config)
+            client = ArcGISClient(auth, config)
+            await client.query_layer(
+                "https://test/layer/0", result_record_count=5000
+            )
+            call_kwargs = mock_fl.query.call_args[1]
+            assert call_kwargs["result_record_count"] == 2000
 
     @pytest.mark.asyncio
     async def test_below_cap_passes_through(self):
         """result_record_count < 2000 passes through unchanged."""
-        with patch.dict(os.environ, {"ARCGIS_PORTAL_URL": "", "ARCGIS_URL": ""}, clear=False):
-            with patch("mcp_arcgis_server.arcgis.auth.GIS"):
-                with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
-                    mock_fl = MagicMock()
-                    mock_fs = MagicMock()
-                    mock_fs.features = []
-                    mock_fs.to_dict.return_value = {"features": []}
-                    mock_fl.query.return_value = mock_fs
-                    mock_fl_cls.return_value = mock_fl
+        config = ServerConfig(portal_url="")
+        with patch("mcp_arcgis_server.arcgis.client.FeatureLayer") as mock_fl_cls:
+            mock_fl = MagicMock()
+            mock_fs = MagicMock()
+            mock_fs.features = []
+            mock_fs.to_dict.return_value = {"features": []}
+            mock_fl.query.return_value = mock_fs
+            mock_fl_cls.return_value = mock_fl
 
-                    from mcp_arcgis_server.arcgis.auth import GISAuthManager
-                    from mcp_arcgis_server.arcgis.client import ArcGISClient
+            from mcp_arcgis_server.arcgis.auth import GISAuthManager
+            from mcp_arcgis_server.arcgis.client import ArcGISClient
 
-                    auth = GISAuthManager()
-                    client = ArcGISClient(auth)
-                    await client.query_layer(
-                        "https://test/layer/0", result_record_count=50
-                    )
-                    call_kwargs = mock_fl.query.call_args[1]
-                    assert call_kwargs["result_record_count"] == 50
+            auth = GISAuthManager(config)
+            client = ArcGISClient(auth, config)
+            await client.query_layer(
+                "https://test/layer/0", result_record_count=50
+            )
+            call_kwargs = mock_fl.query.call_args[1]
+            assert call_kwargs["result_record_count"] == 50
 
 
 # ---------------------------------------------------------------------------
@@ -613,7 +586,7 @@ class TestExecuteQueryPlanUnion:
             "count": 2,
         })
         mock_client.spatial_query = AsyncMock(return_value={
-            "features": [{"attributes": {"STATION": "Station1"}}],
+            "features": [{"attributes": {"PSAP": "Station1"}}],
             "count": 1,
         })
 
@@ -627,10 +600,10 @@ class TestExecuteQueryPlanUnion:
                 "fields": ["NAME"],
                 "children": [{
                     "type": "where",
-                    "layer": "STATIONs",
-                    "layer_url": "https://test/STATIONs/0",
+                    "layer": "PSAPs",
+                    "layer_url": "https://test/psaps/0",
                     "where": "1=1",
-                    "fields": ["STATION"],
+                    "fields": ["PSAP"],
                 }],
             }],
         }
@@ -663,7 +636,7 @@ class TestExecuteQueryPlanUnion:
                 "layer": "Counties",
                 "layer_url": "https://test/counties/0",
                 "where": "NAME='X'",
-                "children": [{"type": "where", "layer": "STATIONs", "layer_url": "https://test/STATIONs/0"}],
+                "children": [{"type": "where", "layer": "PSAPs", "layer_url": "https://test/psaps/0"}],
             }],
         }
 

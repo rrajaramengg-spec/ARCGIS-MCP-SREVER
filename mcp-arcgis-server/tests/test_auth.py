@@ -6,6 +6,18 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from mcp_arcgis_server.arcgis.auth import GISAuthManager
+from mcp_arcgis_server.config import ServerConfig
+
+
+def _make_config(**overrides) -> ServerConfig:
+    """Create a ServerConfig with test defaults."""
+    defaults = {
+        "ARCGIS_PORTAL_URL": "",
+        "ARCGIS_USERNAME": "",
+        "ARCGIS_PASSWORD": "",
+    }
+    defaults.update(overrides)
+    return ServerConfig(**{k.lower().replace("arcgis_", ""): v for k, v in defaults.items()})
 
 
 class TestAuthConcurrency:
@@ -19,7 +31,8 @@ class TestAuthConcurrency:
             call_count += 1
             self_ref._gis = MagicMock()  # Simulate successful init
 
-        auth = GISAuthManager()
+        config = _make_config()
+        auth = GISAuthManager(config)
         auth._portal_url = "https://portal.example.com"
         auth._username = "user"
         auth._password = "pass"
@@ -37,7 +50,8 @@ class TestAuthConcurrency:
 
     @pytest.mark.asyncio
     async def test_initialize_skips_when_already_initialized(self):
-        auth = GISAuthManager()
+        config = _make_config()
+        auth = GISAuthManager(config)
         auth._gis = MagicMock()  # Already initialized
 
         with patch.object(GISAuthManager, "_initialize_gis") as mock:
@@ -46,7 +60,8 @@ class TestAuthConcurrency:
 
     @pytest.mark.asyncio
     async def test_refresh_resets_and_reinitializes(self):
-        auth = GISAuthManager()
+        config = _make_config()
+        auth = GISAuthManager(config)
         auth._portal_url = "https://portal.example.com"
         auth._username = "user"
         auth._password = "pass"
@@ -71,13 +86,14 @@ class TestAuthConcurrency:
 
     @pytest.mark.asyncio
     async def test_config_passed_to_auth(self):
-        config = MagicMock()
-        config.portal_url = "https://portal.test.com"
-        config.username = "testuser"
-        config.password = "testpass"
-        config.verify_ssl = False
-        config.token_url = "https://token.test.com/generate"
-        config.server_url = "https://server.test.com"
+        config = ServerConfig(
+            portal_url="https://portal.test.com",
+            username="testuser",
+            password="testpass",
+            verify_ssl=False,
+            token_url="https://token.test.com/generate",
+            server_url="https://server.test.com",
+        )
 
         auth = GISAuthManager(config)
         assert auth._portal_url == "https://portal.test.com"

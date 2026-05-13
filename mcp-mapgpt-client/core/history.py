@@ -1,22 +1,22 @@
 """
-Conversation history — last-3-turns storage per session with tiktoken-based plan trimming.
+Conversation history — generic message storage per session with token-budget trimming.
 """
 
 import json
 import logging
-import os
 from typing import Any, Dict, List, Optional
 
 import tiktoken
 
+from core.config import settings
 from core.redis_client import get_redis
 
 logger = logging.getLogger(__name__)
 
-MAX_TURNS = int(os.getenv("MAX_HISTORY_TURNS", "3"))
+MAX_TURNS = settings.max_history_turns
 MAX_ENTRIES = MAX_TURNS * 2  # Each turn = 1 user + 1 assistant entry
 TOKEN_LIMIT = 500
-SESSION_TTL = int(os.getenv("SESSION_TTL_SECONDS", "7200"))
+SESSION_TTL = settings.session_ttl_seconds
 
 _encoding: Optional[tiktoken.Encoding] = None
 
@@ -98,14 +98,46 @@ class ConversationHistory:
     """Manages per-session conversation history in Redis under ``hist:{session_id}``."""
 
     @staticmethod
+    async def add_message(
+        session_id: str,
+        role: str,
+        content: str,
+    ) -> bool:
+        """Append a single message to history and trim to MAX_ENTRIES.
+
+        Args:
+            session_id: Session identifier.
+            role: Message role (``"user"``, ``"assistant"``, ``"tool"``).
+            content: Message content string.
+
+        Returns:
+            True on success, False if Redis unavailable.
+        """
+        r = await get_redis()
+        if r is None:
+            logger.warning("Redis unavailable — history not stored")
+            return False
+
+        key = f"hist:{session_id}"
+        try:
+            entry = json.dumps({"role": role, "content": content})
+            await r.rpush(key, entry)
+            await r.ltrim(key, -MAX_ENTRIES, -1)
+            await r.expire(key, SESSION_TTL)
+            return True
+        except Exception as exc:
+            logger.warning("History add_message failed: %s", exc)
+            return False
+
+    @staticmethod
     async def add_turn(
         session_id: str,
         user_query: str,
         plan_json: Dict[str, Any],
     ) -> bool:
-        """Append a user/assistant turn to history and trim to MAX_TURNS.
+        """Legacy wrapper — stores a user + assistant turn pair.
 
-        Returns True on success, False if Redis unavailable.
+        Deprecated: Use ``add_message()`` instead.
         """
         r = await get_redis()
         if r is None:
@@ -121,13 +153,59 @@ class ConversationHistory:
             )
 
             await r.rpush(key, user_entry, assistant_entry)
-            # Trim to keep only last MAX_ENTRIES (oldest entries removed)
             await r.ltrim(key, -MAX_ENTRIES, -1)
             await r.expire(key, SESSION_TTL)
             return True
         except Exception as exc:
             logger.warning("History add_turn failed: %s", exc)
             return False
+
+    @staticmethod
+    async def get_messages(
+        session_id: str,
+        max_tokens: int = 4000,
+    ) -> List[Dict[str, str]]:
+        """Retrieve history messages within a token budget.
+
+        Returns the most recent messages that fit within ``max_tokens``,
+        trimming oldest first.  Returns an empty list if Redis is
+        unavailable or no history exists.
+
+        Args:
+            session_id: Session identifier.
+            max_tokens: Maximum total tokens across all returned messages.
+
+        Returns:
+            List of ``{"role": str, "content": str}`` dicts, oldest first.
+        """
+        r = await get_redis()
+        if r is None:
+            return []
+
+        key = f"hist:{session_id}"
+        try:
+            entries = await r.lrange(key, 0, -1)
+            if not entries:
+                return []
+
+            messages = [json.loads(e) for e in entries]
+
+            # Walk backwards, accumulating tokens until budget exhausted
+            selected: List[Dict[str, str]] = []
+            token_total = 0
+            for msg in reversed(messages):
+                msg_tokens = _count_tokens(msg.get("content", ""))
+                if token_total + msg_tokens > max_tokens:
+                    break
+                selected.append(msg)
+                token_total += msg_tokens
+
+            # Return in chronological order
+            selected.reverse()
+            return selected
+        except Exception as exc:
+            logger.warning("History get_messages failed: %s", exc)
+            return []
 
     @staticmethod
     async def get_turns(session_id: str) -> List[Dict[str, Any]]:

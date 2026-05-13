@@ -24,7 +24,7 @@ MAX_GEOCODE_RESULTS = 10
 async def geocode(
     client: ArcGISClient,
     address: Annotated[str, Field(description="Address string to geocode")],
-    max_results: Annotated[int, Field(description="Maximum number of candidates to return (max 10)")] = 1,
+    max_results: Annotated[int, Field(description="Maximum number of candidates to return (max 10)")] = 5,
     out_sr: Annotated[int, Field(description="Output spatial reference WKID (default WGS84)")] = 4326,
 ) -> Dict[str, Any]:
     """Geocode an address to geographic coordinates.

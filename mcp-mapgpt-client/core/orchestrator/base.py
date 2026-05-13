@@ -9,8 +9,25 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Type
 
+from core.contracts import ILLMService, IMCPClient
+from core.exceptions import QueryPlanError
 from core.llm_service import LLMResponse, LLMService
 from core.mcp_client import MCPClient
+from core.tool_names import (
+    BUFFER_AND_QUERY,
+    COUNT_FEATURES,
+    EXECUTE_QUERY_PLAN,
+    FIND_NEARBY,
+    GEOCODE,
+    GET_FEATURE_TABLE,
+    JOIN_LAYERS,
+    QUERY_FEATURES,
+    REVERSE_GEOCODE,
+    SEARCH_CONTENT,
+    SEARCH_LAYERS,
+    SPATIAL_JOIN_QUERY,
+    SUMMARIZE_FIELD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -61,19 +78,19 @@ class ToolLoopResult:
 # ── Tool → Action Mapping ────────────────────────────────────────────────
 
 TOOL_ACTION_MAP: Dict[str, str] = {
-    "geocode": "locate",
-    "reverse_geocode": "locate",
-    "query_features": "query",
-    "spatial_join_query": "query",
-    "join_layers": "query",
-    "execute_query_plan": "query",
-    "count_features": "query",
-    "buffer_and_query": "query",
-    "find_nearby": "query",
-    "search_content": "search",
-    "search_layers": "search",
-    "summarize_field": "analyze",
-    "get_feature_table": "analyze",
+    GEOCODE: "locate",
+    REVERSE_GEOCODE: "locate",
+    QUERY_FEATURES: "query",
+    SPATIAL_JOIN_QUERY: "query",
+    JOIN_LAYERS: "query",
+    EXECUTE_QUERY_PLAN: "query",
+    COUNT_FEATURES: "query",
+    BUFFER_AND_QUERY: "query",
+    FIND_NEARBY: "query",
+    SEARCH_CONTENT: "search",
+    SEARCH_LAYERS: "search",
+    SUMMARIZE_FIELD: "analyze",
+    GET_FEATURE_TABLE: "analyze",
 }
 
 
@@ -102,7 +119,7 @@ class BaseHandler:
     Each subclass receives only the dependencies it needs via constructor injection.
     """
 
-    def __init__(self, mcp: MCPClient, llm: LLMService) -> None:
+    def __init__(self, mcp: IMCPClient, llm: ILLMService) -> None:
         self._mcp = mcp
         self._llm = llm
 
@@ -128,6 +145,11 @@ class BaseHandler:
             ToolLoopResult with final response, last tool metadata, and timing.
         """
         # Initial LLM call
+        logger.debug(
+            "LLM call — %d messages, %d tools",
+            len(messages),
+            len(tools) if tools else 0,
+        )
         llm_start = time.perf_counter()
         response = await self._llm.complete(messages, tools=tools if tools else None)
         total_llm_ms = (time.perf_counter() - llm_start) * 1000
@@ -137,6 +159,10 @@ class BaseHandler:
         last_tool_name: Optional[str] = None
         last_tool_args: Optional[Dict[str, Any]] = None
         last_tool_result: Any = None
+
+        # Retry policy for individual MCP tool calls
+        from core.orchestrator.graph.resilience import RetryPolicy, retry_with_backoff
+        _tool_retry = RetryPolicy(max_attempts=2, base_delay=1.0)
 
         while response.has_tool_calls and iteration < max_iterations:
             iteration += 1
@@ -168,9 +194,17 @@ class BaseHandler:
 
                 tool_start = time.perf_counter()
                 try:
-                    tool_result = await self._mcp.call_tool(
-                        tc.tool_name, tc.tool_input,
-                        progress_callback=progress_callback,
+                    _call_kw: Dict[str, Any] = {}
+                    if progress_callback is not None:
+                        _call_kw["progress_callback"] = progress_callback
+
+                    async def _do_call() -> Any:
+                        return await self._mcp.call_tool(
+                            tc.tool_name, tc.tool_input, **_call_kw
+                        )
+
+                    tool_result = await retry_with_backoff(
+                        _do_call, _tool_retry
                     )
                     result_str = (
                         json.dumps(tool_result)
@@ -187,7 +221,13 @@ class BaseHandler:
                     )
                     result_str = json.dumps({"error": err_msg})
                     last_tool_result = {"error": err_msg}
-                total_tool_ms += (time.perf_counter() - tool_start) * 1000
+                tool_elapsed_ms = (time.perf_counter() - tool_start) * 1000
+                total_tool_ms += tool_elapsed_ms
+                logger.debug(
+                    "MCP tool %s completed in %.2f ms",
+                    tc.tool_name,
+                    tool_elapsed_ms,
+                )
 
                 messages.append(
                     {
@@ -203,6 +243,12 @@ class BaseHandler:
                 messages, tools=tools if tools else None
             )
             total_llm_ms += (time.perf_counter() - llm_start) * 1000
+
+        # Hard guard: if loop exhausted max_iterations but LLM still wants tools
+        if response.has_tool_calls:
+            raise QueryPlanError(
+                f"Tool-calling loop exceeded {max_iterations} iterations"
+            )
 
         return ToolLoopResult(
             response=response,
@@ -222,11 +268,13 @@ class BaseHandler:
         data: Any = None,
         tool_name: Optional[str] = None,
         tool_args: Optional[Dict[str, Any]] = None,
+        results: Optional[List[Dict[str, Any]]] = None,
         execution_time_ms: float = 0.0,
         timing: Optional[Dict[str, float]] = None,
+        execution_graph: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build a consistent ExecuteResponse-shaped dict."""
-        return {
+        resp = {
             "action": action,
             "message": message,
             "data": data,
@@ -235,6 +283,11 @@ class BaseHandler:
             "execution_time_ms": round(execution_time_ms, 2),
             "timing": timing,
         }
+        if results is not None:
+            resp["results"] = results
+        if execution_graph is not None:
+            resp["execution_graph"] = execution_graph
+        return resp
 
     @staticmethod
     def build_timing(**phases: float) -> Dict[str, float]:

@@ -3,6 +3,8 @@ MCP client for connecting to MCP servers via HTTP/SSE transport.
 Manages ClientSession lifecycle via AsyncExitStack.
 """
 
+import asyncio
+import json
 import logging
 from contextlib import AsyncExitStack
 from typing import Any, Callable, Dict, List, Optional
@@ -10,17 +12,26 @@ from typing import Any, Callable, Dict, List, Optional
 from mcp import ClientSession
 from mcp.client.sse import sse_client
 
+from core.tool_names import ARCGIS_TOOL_NAMES
+
 logger = logging.getLogger(__name__)
+
+# Tools that make calls to the ArcGIS REST API and should be throttled
+# by the shared concurrency semaphore.
+_ARCGIS_TOOLS = ARCGIS_TOOL_NAMES
 
 
 class MCPClient:
     """Client for connecting to an MCP server over HTTP/SSE."""
 
-    def __init__(self) -> None:
+    def __init__(self, arcgis_max_concurrent: int = 10) -> None:
         self._exit_stack: Optional[AsyncExitStack] = None
         self._session: Optional[ClientSession] = None
         self._base_url: Optional[str] = None
         self._arcgis_client: Optional[Any] = None  # For in-process transport cleanup
+        self._arcgis_semaphore: asyncio.Semaphore = asyncio.Semaphore(
+            arcgis_max_concurrent
+        )
 
     @property
     def is_connected(self) -> bool:
@@ -126,6 +137,9 @@ class MCPClient:
     ) -> Any:
         """Call a tool on the connected server.
 
+        ArcGIS-bound tools are throttled by a shared semaphore to prevent
+        overwhelming the ArcGIS REST API with concurrent requests.
+
         Args:
             name: Tool name.
             args: Tool arguments dict.
@@ -134,6 +148,23 @@ class MCPClient:
         Returns:
             Tool result content.
         """
+        if self._is_arcgis_tool(name):
+            async with self._arcgis_semaphore:
+                return await self._call_tool_inner(name, args, progress_callback)
+        return await self._call_tool_inner(name, args, progress_callback)
+
+    @staticmethod
+    def _is_arcgis_tool(name: str) -> bool:
+        """Return True if the tool hits the ArcGIS REST API."""
+        return name in _ARCGIS_TOOLS
+
+    async def _call_tool_inner(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        progress_callback: Optional[Callable] = None,
+    ) -> Any:
+        """Execute the actual MCP tool call (no semaphore)."""
         if not self._session:
             raise ConnectionError("Not connected to MCP server")
 
@@ -152,8 +183,6 @@ class MCPClient:
             # Return the text content from the first content block
             for block in result.content:
                 if hasattr(block, "text"):
-                    import json
-
                     try:
                         parsed = json.loads(block.text)
                         return parsed

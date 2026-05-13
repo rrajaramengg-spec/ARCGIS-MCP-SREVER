@@ -19,8 +19,8 @@ logger = logging.getLogger(__name__)
 async def retrieve_context(query: str) -> Dict[str, List[Dict[str, Any]]]:
     """Execute the full retrieval pipeline via the rag_unified_search() stored function.
 
-    Single embedding call + single DB round-trip replaces the previous
-    three-stage pipeline (retrieve_layers → get_fields → retrieve_patterns).
+    Single embedding call + single DB round-trip for the full RAG pipeline, 
+    returning both layers and patterns in a single result.
 
     Args:
         query: User query string.
@@ -32,7 +32,11 @@ async def retrieve_context(query: str) -> Dict[str, List[Dict[str, Any]]]:
 
     # Single embedding call (cached via module-level @alru_cache)
     embedding_service = get_embedding_service()
-    query_embedding = await embedding_service.embed_query(query)
+    try:
+        query_embedding = await embedding_service.embed_query(query)
+    except Exception as e:
+        logger.error("Embedding failed for query, returning empty context: %s", e)
+        return {"layers": [], "patterns": []}
 
     # Single DB call via stored function
     async with async_session_factory() as db:

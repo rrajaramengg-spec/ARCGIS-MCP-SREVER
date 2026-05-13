@@ -1,193 +1,87 @@
-# MCP ArcGIS Server
+# MapGPT
 
-[![Python 3.12+](https://img.shields.io/badge/python-3.12+-blue.svg)](https://www.python.org/downloads/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-green.svg)](https://fastapi.tiangolo.com/)
-[![MCP](https://img.shields.io/badge/MCP-1.8+-purple.svg)](https://modelcontextprotocol.io/)
-[![Docker](https://img.shields.io/badge/Docker-ready-blue.svg)](https://www.docker.com/)
+MapGPT is an open geospatial assistant project that turns plain-language questions into ArcGIS-ready queries, map lookups, and summarized results.
 
-A RAG-powered natural language interface for geospatial data, decomposed into MCP (Model Context Protocol) modules.
+The repository is organized so the core pieces can be used independently:
 
-## Architecture
+| Component | Purpose |
+|---|---|
+| `mcp-arcgis-server/` | MCP tool server for ArcGIS search, query, geocoding, and spatial operations |
+| `mcp-mapgpt-client/` | API layer that orchestrates prompts, retrieval, and tool execution |
+| `mapgpt-webchat-ui/` | Demo web interface for trying the workflow end to end |
 
-```
-┌─────────────────────┐     ┌──────────────────────┐     ┌─────────────────┐
-│  mcp-client         │────▶│  mcp-arcgis-server   │────▶│ ArcGIS REST API │
-│  (REST API + MCP    │in-  │  (Python package)    │HTTP │                 │
-│   host + RAG)       │proc │  13 spatial tools     │     │                 │
-│  :8002              │     │                      │     │                 │
-└─────────────────────┘     └──────────────────────┘     └─────────────────┘
-         ▲
-         │ REST/WS
-┌────────┴──────────┐    ┌─────────────────────┐
-│ webchat-ui        │    │  Postgres + Redis   │
-│ (Demo Only :8080) │    │  (Infrastructure)   │
-└───────────────────┘    └─────────────────────┘
-```
+## What This Repository Is For
 
-### Modules
+This project is intended as a reusable reference for teams building natural-language experiences on top of ArcGIS data. It focuses on three practical outcomes:
 
-| Module | Description | Port |
-|---|---|---|
-| [`mcp-arcgis-server/`](mcp-arcgis-server/) | Installable MCP server package with 13 ArcGIS tools (query, spatial, discovery, analysis, buffer, proximity, geocoding) | — |
-| [`mcp-mapgpt-client/`](mcp-mapgpt-client/) | REST API + MCP host with RAG pipeline, locate/summarize-stat endpoints, and slash-command routing | 8002 |
-| [`mapgpt-webchat-ui/`](mapgpt-webchat-ui/) | Demo web chat UI with slash-command suggestion dropdown (not production) | 8080 |
+- turning a user request into a valid GIS action
+- keeping tool execution inspectable instead of opaque
+- offering a demo interface without coupling the whole system to one UI
 
 ## Quick Start
 
 ```powershell
-# Configure environment
-cp .env.example .env
-# Edit .env with your credentials
+Copy-Item .env.example .env
+# Fill in your own credentials and endpoints in .env
 
-# Start production services
 docker-compose up -d
+```
 
-# (Optional) Start with demo web UI
+To run the demo UI as well:
+
+```powershell
 docker-compose --profile demo up -d
+```
 
-# API is at http://localhost:8002/api/v1/
-# Health: http://localhost:8002/health
+Default local endpoints:
+
+- API health: `http://localhost:8002/health`
+- API docs: `http://localhost:8002/docs`
+- Demo UI: `http://localhost:8080`
+
+## Public Documentation
+
+The public docs in this repository stay focused on usage and system boundaries.
+
+- Root setup and publication-safe configuration live here in this README.
+- Component-specific docs live in each package directory.
+- UI implementation notes and stack details live in `mapgpt-webchat-ui/docs/ARCHITECTURE.md`.
+
+## Repository Layout
+
+```text
+.
+├── mcp-arcgis-server/
+├── mcp-mapgpt-client/
+├── mapgpt-webchat-ui/
+├── alembic/
+├── docker-compose.yml
+└── .env.example
 ```
 
 ## Configuration
 
-Configure via environment variables in `.env`:
+The project uses environment variables for credentials and deployment-specific values. The checked-in examples only contain placeholders.
 
-```env
-# Application
-APP_NAME=MCP ArcGIS Server
-APP_VERSION=1.0.0
-DEBUG=false
+Minimum values you will usually need:
 
-# Database
-DATABASE_URL=postgresql+asyncpg://postgres:pass@localhost:5432/gisdb
+- ArcGIS portal URL or service access details
+- an LLM endpoint and key
+- a database connection for retrieval features
+- a Redis instance for caching and background work
 
-# Redis
-REDIS_URL=redis://localhost:6379/0
+See `.env.example` for the complete placeholder list.
 
-# Azure OpenAI
-AZURE_OPENAI_API_KEY=your-key
-AZURE_OPENAI_ENDPOINT=your-endpoint
+## Notes For Public Use
 
-# ArcGIS
-ARCGIS_PORTAL_URL=https://your-arcgis-portal.example.com/arcgis
-ARCGIS_USERNAME=your-username
-ARCGIS_PASSWORD=your-password
-```
-
-See [`.env.example`](./.env.example) for all configuration options.
-
-## API Endpoints
-
-### Query Processing
-- `POST /api/v1/execute` — Process natural language query and return ArcGIS data
-- `POST /api/v1/query` — Generate a query plan via RAG + LLM (no execution)
-- `POST /api/v1/summarize` — Execute and return LLM-generated summary
-- `POST /api/v1/locate` — Geocode/reverse-geocode (no LLM)
-- `POST /api/v1/summarize-stat` — Field statistics with LLM summary
-- `POST /api/v1/arcgis-execute` — Direct ArcGIS tool execution (no RAG)
-- `GET /api/v1/commands` — Available slash commands
-
-### Document Management
-- `POST /api/v1/ingest` — Ingest documents into RAG vector store
-
-## Technology Stack
-
-- **Framework**: FastAPI (async)
-- **Database**: PostgreSQL 16 + pgvector
-- **Cache**: Redis 7
-- **LLM**: Azure OpenAI / OpenAI
-- **RAG**: LangChain + LangGraph
-- **Task Queue**: Celery
-- **ORM**: SQLAlchemy (async)
-- **Migrations**: Alembic
-- **MCP**: Model Context Protocol 1.8+
-
-## Docker Deployment
-
-### Services
-
-- **postgres**: PostgreSQL 16 with pgvector
-- **redis**: Redis 7 for caching
-- **mcp-mapgpt-client**: REST API + MCP host
-- **celery-worker**: Background task processor
-- **webchat-ui**: Demo web chat (optional, `--profile demo`)
-
-### Commands
-
-```powershell
-# Start all services
-docker-compose up -d
-
-# View logs
-docker-compose logs -f mcp-mapgpt-client
-
-# Stop services
-docker-compose down
-
-# Rebuild
-docker-compose up -d --build
-```
-
-## Database Migrations
-
-```powershell
-# Apply migrations
-docker-compose exec mcp-mapgpt-client alembic upgrade head
-
-# Create new migration
-docker-compose exec mcp-mapgpt-client alembic revision --autogenerate -m "description"
-```
-
-## Development
-
-### Prerequisites
-
-- Python 3.11+
-- PostgreSQL 14+ with pgvector
-- Redis 7+
-- Azure OpenAI or OpenAI API Key
-- ArcGIS Enterprise or ArcGIS Online account
-
-### Local Setup
-
-```powershell
-python -m venv venv
-.\venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-alembic upgrade head
-uvicorn main:app --reload --port 8002
-```
-
-### Running Tests
-
-```powershell
-pytest tests/ -v
-```
-
-## Features
-
-- Natural language query processing via RAG + LLM
-- 13 typed MCP tools for ArcGIS operations
-- Vector similarity search with pgvector
-- Spatial joins, buffer analysis, proximity search
-- Geocoding and reverse geocoding
-- Field-level statistics and summarization
-- Slash-command prefix routing
-- Async processing with Celery
-- Docker deployment
-- OpenAPI documentation (Swagger UI / ReDoc)
-
-## License
-
-[Your License Here]
+- No production credentials or organization-specific values should be committed.
+- The demo UI is optional and should be treated as a sample client, not a required production surface.
+- Database migrations and internal retrieval structures are included for local development, but the public README intentionally avoids prescribing a specific private data model.
 
 ## Contributing
 
-Contributions are welcome! Please:
+Contributions are welcome if they improve portability, clarity, or the core geospatial workflow. If you are publishing a derived version, review your own environment files, sample prompts, and deployment defaults before release.
 
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests
-5. Submit a pull request
+## License
+
+See `LICENSE`.

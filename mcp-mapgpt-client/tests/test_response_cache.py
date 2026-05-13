@@ -21,7 +21,7 @@ def mock_redis():
 
 SAMPLE_RESPONSE = {
     "action": "query",
-    "message": "Found 3 STATIONSs",
+    "message": "Found 3 PSAPs",
     "data": {"results": []},
     "execution_time_ms": 1234.5,
 }
@@ -35,7 +35,7 @@ async def test_cache_set_and_get(mock_redis):
     with patch("core.response_cache.get_redis", return_value=mock_redis):
         from core.response_cache import ResponseCache
 
-        await ResponseCache.set("show STATIONS", "abc123", SAMPLE_RESPONSE)
+        await ResponseCache.set("show psap", "abc123", SAMPLE_RESPONSE)
 
     mock_redis.hset.assert_called_once()
     call_kwargs = mock_redis.hset.call_args
@@ -45,7 +45,7 @@ async def test_cache_set_and_get(mock_redis):
     mock_redis.expire.assert_called_once()
 
     with patch("core.response_cache.get_redis", return_value=mock_redis):
-        result = await ResponseCache.get("show STATIONS", "abc123")
+        result = await ResponseCache.get("show psap", "abc123")
 
     assert result == SAMPLE_RESPONSE
 
@@ -134,19 +134,19 @@ async def test_redis_unavailable():
 @pytest.mark.asyncio
 async def test_query_mapping(mock_redis):
     """store_query_mapping and get_cache_key_for_query round-trip."""
-    mock_redis.get.return_value = "fcache:show STATIONS:abc123"
+    mock_redis.get.return_value = "fcache:show psap:abc123"
 
     with patch("core.response_cache.get_redis", return_value=mock_redis):
         from core.response_cache import ResponseCache
 
-        await ResponseCache.store_query_mapping("sess1", "qid1", "fcache:show STATIONS:abc123")
+        await ResponseCache.store_query_mapping("sess1", "qid1", "fcache:show psap:abc123")
 
     mock_redis.set.assert_called_once()
     args = mock_redis.set.call_args
     assert args[0][0] == "qmap:sess1:qid1"
-    assert args[0][1] == "fcache:show STATIONS:abc123"
+    assert args[0][1] == "fcache:show psap:abc123"
 
     with patch("core.response_cache.get_redis", return_value=mock_redis):
         key = await ResponseCache.get_cache_key_for_query("sess1", "qid1")
 
-    assert key == "fcache:show STATIONS:abc123"
+    assert key == "fcache:show psap:abc123"

@@ -17,7 +17,7 @@ except ImportError:
     from app.core.database import Base
 
 database_url = os.getenv(
-    "DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/gisdb"
+    "DATABASE_URL", "postgresql+asyncpg://mapgpt:change-me@localhost:5432/mapgpt"
 )
 # Convert async URL to sync for Alembic
 database_url_sync = database_url.replace("+asyncpg", "")

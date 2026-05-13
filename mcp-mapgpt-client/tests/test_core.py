@@ -1,5 +1,5 @@
 """
-Unit tests for mcp-client core modules.
+Unit tests for mcp-mapgpt-client core modules.
 """
 
 import json
@@ -118,14 +118,14 @@ class TestMCPClient:
 
 
 class TestOrchestrator:
-    """Tests for Orchestrator pipeline."""
+    """Tests for MapGPTOrchestrator pipeline."""
 
     @pytest.mark.asyncio
     async def test_process_message_response(self):
         """Orchestrator returns message when LLM gives text response."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -141,9 +141,9 @@ class TestOrchestrator:
         with patch(
             "core.orchestrator.query_handler.build_rag_context",
             new_callable=AsyncMock,
-            return_value=("", []),
+            return_value=("=== AVAILABLE LAYERS ===\nTEST: https://example.com/0", [{"name": "TEST"}]),
         ):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.plan("test query")
 
         assert result["action"] == "message"
@@ -154,7 +154,7 @@ class TestOrchestrator:
         """Orchestrator plan() returns parsed JSON plan directly (no tool loop)."""
         from core.llm_service import LLMResponse, LLMService
         from core.mcp_client import MCPClient
-        from core.orchestrator import Orchestrator
+        from core.orchestrator import MapGPTOrchestrator
 
         mock_mcp = MagicMock(spec=MCPClient)
         mock_mcp.is_connected = True
@@ -182,9 +182,9 @@ class TestOrchestrator:
         with patch(
             "core.orchestrator.query_handler.build_rag_context",
             new_callable=AsyncMock,
-            return_value=("", []),
+            return_value=("=== AVAILABLE LAYERS ===\nTEST: https://test", [{"name": "TEST"}]),
         ):
-            orch = Orchestrator(mock_mcp, mock_llm)
+            orch = MapGPTOrchestrator(mock_mcp, mock_llm)
             result = await orch.plan("How many features?")
 
         assert result["action"] == "query"

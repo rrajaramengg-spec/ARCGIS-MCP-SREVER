@@ -4,7 +4,6 @@ Provides async engine and session factory initialised from DATABASE_URL.
 """
 
 import logging
-import os
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -35,16 +34,15 @@ def async_session_factory() -> AsyncSession:
     return _session_factory()
 
 
-def init_db() -> None:
-    """Initialise the async engine and session factory from DATABASE_URL.
+def init_db(database_url: str) -> None:
+    """Initialise the async engine and session factory.
+
+    Args:
+        database_url: SQLAlchemy async connection URL.
 
     Must be called once at application startup before any RAG functions.
     """
     global engine, _session_factory
-
-    database_url = os.getenv(
-        "DATABASE_URL", "postgresql+asyncpg://mapgpt:mapgpt@postgres:5432/mapgpt"
-    )
 
     engine = create_async_engine(
         database_url,

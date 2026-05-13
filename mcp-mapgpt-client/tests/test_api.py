@@ -1,9 +1,9 @@
 """
-Integration tests for mcp-client REST API endpoints.
+Integration tests for mcp-mapgpt-client REST API endpoints.
 Uses FastAPI TestClient.
 """
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 class TestHealthEndpoint:
@@ -24,18 +24,22 @@ class TestHealthEndpoint:
 
 
 class TestExecuteEndpoint:
-    """Tests for /api/v1/execute endpoint."""
+    """Tests for /api/mapgpt/v1/execute endpoint."""
 
     def test_execute_missing_query_returns_422(self):
         """Missing query field returns validation error."""
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            from fastapi.testclient import TestClient
-            from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
+        mock_orch = MagicMock()
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.post("/api/v1/execute", json={})
+            response = client.post("/api/mapgpt/v1/execute", json={})
             assert response.status_code == 422
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
     def test_old_prefix_returns_404(self):
         """Old /api/v1/ prefix should not be registered."""
@@ -50,15 +54,19 @@ class TestExecuteEndpoint:
 
 
 class TestIngestEndpoint:
-    """Tests for /api/v1/ingest endpoint."""
+    """Tests for /api/mapgpt/v1/ingest endpoint."""
 
     def test_ingest_missing_fields_returns_422(self):
         """Missing required fields returns validation error."""
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            from fastapi.testclient import TestClient
-            from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_rag_service
 
+        mock_rag = MagicMock()
+        app.dependency_overrides[get_rag_service] = lambda: mock_rag
+        try:
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.post("/api/v1/ingest", json={"content": "test"})
+            response = client.post("/api/mapgpt/v1/ingest", json={"content": "test"})
             assert response.status_code == 422
+        finally:
+            app.dependency_overrides.pop(get_rag_service, None)

@@ -3,7 +3,6 @@ Knowledge base models for the RAG vector store.
 Defines kb_layers, kb_fields, and kb_query_patterns tables.
 """
 
-import os
 from datetime import datetime
 
 from sqlalchemy import (
@@ -20,8 +19,9 @@ from sqlalchemy.orm import relationship
 from pgvector.sqlalchemy import Vector
 
 from .connection import Base
+from core.config import settings
 
-_EMBEDDING_DIM = int(os.getenv("EMBEDDING_DIMENSION", "1536"))
+_EMBEDDING_DIM = settings.embedding_dimension
 
 
 class KBLayer(Base):

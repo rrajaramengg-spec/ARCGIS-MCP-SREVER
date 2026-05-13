@@ -1,5 +1,10 @@
 """
-Smoke tests for webchat-ui.
+Smoke tests for mapgpt-webchat-ui.
+
+After the React migration, the SPA is served from dist/ (Vite build)
+or falls back to static/ (legacy). These tests verify the FastAPI server,
+proxy routes, and WebSocket relay — NOT the React component behavior
+(covered by Vitest unit tests).
 """
 
 from fastapi.testclient import TestClient
@@ -16,13 +21,14 @@ class TestWebApp:
         assert response.status_code == 200
         assert response.json()["status"] == "ok"
 
-    def test_static_index(self):
+    def test_root_serves_html(self):
         from web_app import app
 
         client = TestClient(app)
         response = client.get("/")
         assert response.status_code == 200
-        assert "GIS Chat" in response.text
+        # Should serve HTML (either React SPA or legacy index.html)
+        assert "text/html" in response.headers.get("content-type", "")
 
     def test_websocket_connect(self):
         from web_app import app
@@ -33,52 +39,16 @@ class TestWebApp:
             assert ws is not None
 
 
-class TestFeatureTable:
-    """Tests for feature table rendering in index.html."""
-
-    def test_index_contains_feature_table_function(self):
-        """index.html includes buildFeatureTable JS function."""
-        from web_app import app
-
-        client = TestClient(app)
-        response = client.get("/")
-        html = response.text
-        assert "function buildFeatureTable(data)" in html
-
-    def test_feature_table_uses_arcgis_standard_keys(self):
-        """buildFeatureTable uses ArcGIS standard camelCase keys."""
-        from web_app import app
-
-        client = TestClient(app)
-        html = client.get("/").text
-        # ArcGIS standard camelCase keys
-        assert "data.geometryType" in html
-        assert "data.spatialReference" in html
-        # Field alias support from ArcGIS standard fields metadata
-        assert "data.fields" in html
-        assert "fieldAliases" in html
-
-    def test_feature_table_caps_at_10(self):
-        """buildFeatureTable caps display at 10 features."""
-        from web_app import app
-
-        client = TestClient(app)
-        html = client.get("/").text
-        assert "features.slice(0, 10)" in html
-        assert "Showing" in html
-
-
 class TestCommandsProxy:
     """Tests for /api/commands proxy and WebSocket relay."""
 
     def test_commands_proxy(self, httpx_mock):
-        """10.1: /api/commands proxy returns commands from MCP client."""
+        """10.1: /api/commands proxy returns commands from mcp-mapgpt-client."""
         from unittest.mock import patch, AsyncMock
-        import httpx as httpx_mod
 
         mock_commands = [
-            {"name": "/locate", "description": "Geocode", "endpoint": "/api/v1/locate", "params": "<address>"},
-            {"name": "/summarize", "description": "Summarize", "endpoint": "/api/v1/summarize", "params": "<query>"},
+            {"name": "/locate", "description": "Geocode", "endpoint": "/api/mapgpt/v1/locate", "params": "<address>"},
+            {"name": "/summarize", "description": "Summarize", "endpoint": "/api/mapgpt/v1/summarize", "params": "<query>"},
         ]
 
         from web_app import app
@@ -99,35 +69,6 @@ class TestCommandsProxy:
             data = response.json()
             assert isinstance(data, list)
 
-    def test_websocket_sends_slash_commands_to_execute(self):
-        """10.2: WebSocket forwards slash commands to /execute endpoint."""
-        from web_app import app
-
-        # Verify the webchat WebSocket relay code sends to /execute
-        client = TestClient(app)
-        html = client.get("/").text
-        # WebSocket sends to /execute via ws.send (which goes through the relay)
-        assert "/api/v1/execute" in html or "ws.send" in html
-
-    def test_websocket_forwards_normal_messages(self):
-        """10.3: WebSocket forwards normal messages to /execute unchanged."""
-        from web_app import app
-
-        client = TestClient(app)
-        html = client.get("/").text
-        # The webchat always sends to /execute via WebSocket relay
-        assert "ws.send(JSON.stringify" in html
-
-    def test_command_dropdown_in_html(self):
-        """Verify command suggestion dropdown exists in index.html."""
-        from web_app import app
-
-        client = TestClient(app)
-        html = client.get("/").text
-        assert "fetchCommands" in html
-        assert "cachedCommands" in html
-        assert "/api/commands" in html
-
     def test_placeholder_hints_commands(self):
         """Input placeholder mentions / for commands."""
         from web_app import app
@@ -135,3 +76,76 @@ class TestCommandsProxy:
         client = TestClient(app)
         html = client.get("/").text
         assert "type / for commands" in html
+
+
+class TestFeedbackProxy:
+    """Tests for /api/user-feedback proxy route."""
+
+    def test_feedback_proxy_success(self):
+        """Feedback POST is forwarded to mcp-mapgpt-client and response returned."""
+        from unittest.mock import patch, AsyncMock, MagicMock
+        from web_app import app
+
+        upstream_response = {"status": "ok", "action": "promoted"}
+
+        with patch("web_app.httpx.AsyncClient") as MockClient:
+            mock_response = MagicMock()
+            mock_response.status_code = 200
+            mock_response.json.return_value = upstream_response
+            mock_instance = AsyncMock()
+            mock_instance.post = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            client = TestClient(app)
+            response = client.post("/api/user-feedback", json={
+                "session_id": "test-session",
+                "query_id": "test-query-id",
+                "feedback": "up",
+            })
+            assert response.status_code == 200
+            assert response.json() == upstream_response
+
+    def test_feedback_proxy_upstream_error(self):
+        """Returns 502 when upstream returns non-2xx status."""
+        from unittest.mock import patch, AsyncMock
+        from web_app import app
+
+        with patch("web_app.httpx.AsyncClient") as MockClient:
+            mock_response = AsyncMock()
+            mock_response.status_code = 422
+            mock_instance = AsyncMock()
+            mock_instance.post = AsyncMock(return_value=mock_response)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            client = TestClient(app)
+            response = client.post("/api/user-feedback", json={
+                "session_id": "s", "query_id": "q", "feedback": "up",
+            })
+            assert response.status_code == 502
+            assert "Upstream returned HTTP 422" in response.json()["error"]
+
+    def test_feedback_proxy_connection_error(self):
+        """Returns 502 when upstream is unreachable."""
+        from unittest.mock import patch, AsyncMock
+        import httpx as httpx_mod
+        from web_app import app
+
+        with patch("web_app.httpx.AsyncClient") as MockClient:
+            mock_instance = AsyncMock()
+            mock_instance.post = AsyncMock(
+                side_effect=httpx_mod.ConnectError("Connection refused")
+            )
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_instance
+
+            client = TestClient(app)
+            response = client.post("/api/user-feedback", json={
+                "session_id": "s", "query_id": "q", "feedback": "down",
+            })
+            assert response.status_code == 502
+            assert "error" in response.json()

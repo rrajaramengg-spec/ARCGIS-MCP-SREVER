@@ -1,11 +1,10 @@
 """
-mcp-client — FastAPI application entry point.
+mcp-mapgpt-client — FastAPI application entry point.
 Acts as MCP host/client and REST API service.
 """
 
 import asyncio
 import logging
-import os
 import time
 import traceback
 from contextlib import asynccontextmanager
@@ -15,26 +14,26 @@ from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 
-from logging_config import setup_logging
+from core.observability import setup_logging
+
+from core.exceptions import ConfigurationError, ErrorResponse, MapGPTError
 
 load_dotenv()
-setup_logging("mcp-client")
+# Early bootstrap logging (text format, re-configured in lifespan with full config)
+setup_logging("mcp-mapgpt-client")
 
 logger = logging.getLogger(__name__)
 
 # --- Module-level singletons (initialised during lifespan) ---
 from core.mcp_client import MCPClient
-from core.llm_service import LLMService
-from core.orchestrator import Orchestrator
 
-mcp_client = MCPClient()
-llm_service = LLMService()
-orchestrator: Orchestrator = None  # type: ignore[assignment]
+mcp_client = MCPClient()  # re-created with config during lifespan
+orchestrator = None  # type: ignore[assignment]
 
 # Rate limit state (simple in-memory per-IP counter)
 _rate_limit_store: dict[str, list[float]] = {}
-_RATE_LIMIT_PER_MINUTE = int(os.getenv("RATE_LIMIT_PER_MINUTE", "60"))
 
 
 # ---------------------------------------------------------------------------
@@ -45,21 +44,50 @@ async def lifespan(app: FastAPI):
     """Startup and shutdown lifecycle."""
     global orchestrator
 
-    # Initialise RAG database
-    from core.rag.database import init_db as init_rag_db
+    # --- Validate configuration ---
+    from core.config import ClientConfig
 
-    init_rag_db()
+    try:
+        config = ClientConfig()
+    except ValidationError as exc:
+        raise ConfigurationError(
+            f"Invalid configuration — {exc.error_count()} error(s): {exc}"
+        ) from exc
+
+    from core import providers
+
+    providers.set_config(config)
+
+    # --- Re-create MCP client with config ---
+    global mcp_client
+    mcp_client = MCPClient(arcgis_max_concurrent=config.arcgis_max_concurrent)
+
+    # --- Re-configure logging with full config ---
+    setup_logging(
+        service_name="mcp-mapgpt-client",
+        log_level=config.log_level,
+        log_format=config.log_format,
+        correlation_enabled=config.log_correlation_enabled,
+    )
+
+    # --- Initialise services with config injection ---
+    from core.llm_service import LLMService
+    from core.rag.database import init_db as init_rag_db
+    from core.rag.embeddings.service import get_embedding_service
+
+    llm_service = LLMService(config)
+    get_embedding_service(config)
+    init_rag_db(config.database_url)
     logger.info("RAG database initialised")
 
     # Connect to mcp-arcgis-server (in-process by default, HTTP/SSE if URL set)
-    arcgis_mcp_url = os.getenv("ARCGIS_MCP_URL", "")
-    if arcgis_mcp_url and arcgis_mcp_url != "in-process":
+    if config.arcgis_mcp_url and config.arcgis_mcp_url != "in-process":
         # HTTP/SSE transport to a remote mcp-arcgis-server
         max_retries = 5
         for attempt in range(1, max_retries + 1):
             try:
-                await mcp_client.connect(arcgis_mcp_url)
-                logger.info("MCP connection established to %s", arcgis_mcp_url)
+                await mcp_client.connect(config.arcgis_mcp_url)
+                logger.info("MCP connection established to %s", config.arcgis_mcp_url)
                 break
             except Exception as exc:
                 logger.warning(
@@ -85,8 +113,16 @@ async def lifespan(app: FastAPI):
                 "Failed to start in-process MCP transport — running degraded: %s", exc
             )
 
-    orchestrator = Orchestrator(mcp_client, llm_service)
-    logger.info("Orchestrator ready")
+    from core.rag.service import RAGService
+    from core.orchestrator import MapGPTOrchestrator
+
+    rag_service = RAGService()
+    providers.set_rag_service(rag_service)
+
+    from core.config import settings
+    orchestrator = MapGPTOrchestrator(mcp_client, llm_service, rag_service=rag_service, config=settings)
+    providers.set_orchestrator(orchestrator)
+    logger.info("MapGPTOrchestrator ready")
 
     yield
 
@@ -102,13 +138,15 @@ async def lifespan(app: FastAPI):
 # App
 # ---------------------------------------------------------------------------
 app = FastAPI(
-    title="MCP ArcGIS Client",
+    title="MapGPT Client",
     version="1.0.0",
     lifespan=lifespan,
 )
 
-# CORS middleware
-cors_origins = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",")
+# CORS middleware — reads from config singleton for values needed before lifespan
+from core.config import settings as _settings
+
+cors_origins = _settings.cors_origins.split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in cors_origins],
@@ -124,6 +162,16 @@ app.add_middleware(
 @app.middleware("http")
 async def request_logging_and_rate_limit(request: Request, call_next):
     """Log requests/responses and enforce rate limiting."""
+    # Re-establish correlation ContextVar — BaseHTTPMiddleware runs this
+    # function in a separate anyio task that does not inherit the parent's
+    # ContextVar modifications.  The outer CorrelationMiddleware stores the
+    # ID in scope["state"] so we can retrieve it here.
+    _rid = request.scope.get("state", {}).get("_correlation_id")
+    if _rid:
+        from core.observability.context import request_id_var
+
+        request_id_var.set(_rid)
+
     client_ip = request.client.host if request.client else "unknown"
 
     # Rate limiting
@@ -134,7 +182,7 @@ async def request_logging_and_rate_limit(request: Request, call_next):
     _rate_limit_store[client_ip] = [
         t for t in _rate_limit_store[client_ip] if t > window_start
     ]
-    if len(_rate_limit_store[client_ip]) >= _RATE_LIMIT_PER_MINUTE:
+    if len(_rate_limit_store[client_ip]) >= _settings.rate_limit_per_minute:
         logger.warning("Rate limit exceeded for %s", client_ip)
         return JSONResponse(
             status_code=429,
@@ -157,6 +205,16 @@ async def request_logging_and_rate_limit(request: Request, call_next):
     return response
 
 
+# Correlation middleware — must be added AFTER @app.middleware("http") so that
+# insert(0, ...) puts it at the front of user_middleware.  After reversal in
+# build_middleware_stack this becomes the outermost wrapper, ensuring the
+# correlation ID is available in scope["state"] before any inner middleware runs.
+if _settings.log_correlation_enabled:
+    from core.observability.middleware import CorrelationMiddleware
+
+    app.add_middleware(CorrelationMiddleware)
+
+
 # ---------------------------------------------------------------------------
 # Error handlers
 # ---------------------------------------------------------------------------
@@ -174,6 +232,29 @@ async def validation_error_handler(request: Request, exc: RequestValidationError
     return JSONResponse(
         status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"error": "Validation Error", "detail": detail},
+    )
+
+
+@app.exception_handler(MapGPTError)
+async def mapgpt_error_handler(request: Request, exc: MapGPTError):
+    """Structured handler for MapGPTError hierarchy.
+
+    4xx logged as WARNING, 5xx as ERROR with traceback.
+    """
+    if exc.status_code >= 500:
+        logger.error(
+            "MapGPTError [%s] %s\n%s", exc.code, exc.message, traceback.format_exc()
+        )
+    else:
+        logger.warning("MapGPTError [%s] %s", exc.code, exc.message)
+    body = ErrorResponse(
+        error=exc.message,
+        code=exc.code,
+        detail=getattr(exc, "tool_name", None) or None,
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content=body.model_dump(exclude_none=True),
     )
 
 

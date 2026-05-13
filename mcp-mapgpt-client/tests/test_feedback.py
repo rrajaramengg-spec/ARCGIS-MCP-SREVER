@@ -26,7 +26,7 @@ async def test_thumbs_up_promotes(mock_app):
 
         async with AsyncClient(transport=ASGITransport(app=mock_app), base_url="http://test") as ac:
             resp = await ac.post(
-                "/api/v1/user-feedback",
+                "/api/mapgpt/v1/user-feedback",
                 json={"session_id": "s1", "query_id": "q1", "feedback": "up"},
             )
 
@@ -45,7 +45,7 @@ async def test_thumbs_down_evicts_unpromoted(mock_app):
 
         async with AsyncClient(transport=ASGITransport(app=mock_app), base_url="http://test") as ac:
             resp = await ac.post(
-                "/api/v1/user-feedback",
+                "/api/mapgpt/v1/user-feedback",
                 json={"session_id": "s1", "query_id": "q1", "feedback": "down"},
             )
 
@@ -62,7 +62,7 @@ async def test_thumbs_down_protected_on_promoted(mock_app):
 
         async with AsyncClient(transport=ASGITransport(app=mock_app), base_url="http://test") as ac:
             resp = await ac.post(
-                "/api/v1/user-feedback",
+                "/api/mapgpt/v1/user-feedback",
                 json={"session_id": "s1", "query_id": "q1", "feedback": "down"},
             )
 
@@ -78,7 +78,7 @@ async def test_no_cache_entry(mock_app):
 
         async with AsyncClient(transport=ASGITransport(app=mock_app), base_url="http://test") as ac:
             resp = await ac.post(
-                "/api/v1/user-feedback",
+                "/api/mapgpt/v1/user-feedback",
                 json={"session_id": "s1", "query_id": "q1", "feedback": "up"},
             )
 
@@ -91,7 +91,7 @@ async def test_invalid_feedback_value(mock_app):
     """Invalid feedback value → 422."""
     async with AsyncClient(transport=ASGITransport(app=mock_app), base_url="http://test") as ac:
         resp = await ac.post(
-            "/api/v1/user-feedback",
+            "/api/mapgpt/v1/user-feedback",
             json={"session_id": "s1", "query_id": "q1", "feedback": "maybe"},
         )
 
@@ -103,7 +103,7 @@ async def test_missing_fields(mock_app):
     """Missing required fields → 422."""
     async with AsyncClient(transport=ASGITransport(app=mock_app), base_url="http://test") as ac:
         resp = await ac.post(
-            "/api/v1/user-feedback",
+            "/api/mapgpt/v1/user-feedback",
             json={"feedback": "up"},
         )
 

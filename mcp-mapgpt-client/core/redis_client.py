@@ -3,10 +3,11 @@ Shared async Redis connection pool (DB 0) with lazy init and graceful fallback.
 """
 
 import logging
-import os
 from typing import Optional
 
 import redis.asyncio as aioredis
+
+from core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ async def get_redis() -> Optional[aioredis.Redis]:
             _redis = None
             _pool = None
 
-    redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
+    redis_url = settings.redis_url
     try:
         _pool = aioredis.ConnectionPool.from_url(
             redis_url,

@@ -46,7 +46,9 @@ class TestFindNearby:
             "features": [
                 _make_feature("Near", -104.91, 39.71),
                 _make_feature("Far", -104.95, 39.75),
-            ]
+            ],
+            "geometryType": "esriGeometryPoint",
+            "spatialReference": {"wkid": 4326},
         }
         result = await find_nearby(
             mock_client,
@@ -58,16 +60,29 @@ class TestFindNearby:
         )
         assert result["count"] == 2
         assert result["search_radius"] == 5
-        # Should be sorted by distance (nearest first)
-        assert result["features"][0]["distance"] <= result["features"][1]["distance"]
+        assert "buffer_geometry" in result
+        assert "near_features" in result
+        assert "proximity_lines" in result
+        assert len(result["near_features"]) == 2
+        assert len(result["proximity_lines"]) == 2
+        # Near features should have no distance property
+        assert "distance" not in result["near_features"][0]
+        # Proximity lines should have distance in feet in attributes
+        assert result["proximity_lines"][0]["attributes"]["distance"] is not None
+        assert result["proximity_lines"][0]["attributes"]["distance_unit"] == "feet"
+        assert result["proximity_lines"][0]["attributes"]["target_id"] == 0
+        # First line should have shorter distance (sorted by distance)
+        assert result["proximity_lines"][0]["attributes"]["distance"] <= result["proximity_lines"][1]["attributes"]["distance"]
 
     @pytest.mark.asyncio
-    async def test_distance_enrichment(self, mock_client, mock_ctx):
+    async def test_distance_in_proximity_lines(self, mock_client, mock_ctx):
         from mcp_arcgis_server.tools.proximity import find_nearby
 
         mock_client.buffer_geometry.return_value = SAMPLE_BUFFER
         mock_client.query_layer.return_value = {
-            "features": [_make_feature("A", -104.91, 39.71)]
+            "features": [_make_feature("A", -104.91, 39.71)],
+            "geometryType": "esriGeometryPoint",
+            "spatialReference": {"wkid": 4326},
         }
         result = await find_nearby(
             mock_client,
@@ -77,10 +92,15 @@ class TestFindNearby:
             radius=10,
             unit="miles",
         )
-        feat = result["features"][0]
-        assert feat["distance"] is not None
-        assert feat["distance_unit"] == "miles"
-        assert isinstance(feat["distance"], float)
+        # Distance should be in proximity lines, not near features
+        near_feat = result["near_features"][0]
+        assert "distance" not in near_feat
+        assert "distance_unit" not in near_feat
+        # Proximity line should have distance in feet
+        prox_line = result["proximity_lines"][0]
+        assert prox_line["attributes"]["distance"] is not None
+        assert prox_line["attributes"]["distance_unit"] == "feet"
+        assert isinstance(prox_line["attributes"]["distance"], float)
 
     @pytest.mark.asyncio
     async def test_max_results_cap(self, mock_client, mock_ctx):
@@ -88,7 +108,11 @@ class TestFindNearby:
 
         mock_client.buffer_geometry.return_value = SAMPLE_BUFFER
         features = [_make_feature(f"F{i}", -104.9 + i * 0.01, 39.7) for i in range(10)]
-        mock_client.query_layer.return_value = {"features": features}
+        mock_client.query_layer.return_value = {
+            "features": features,
+            "geometryType": "esriGeometryPoint",
+            "spatialReference": {"wkid": 4326},
+        }
         result = await find_nearby(
             mock_client,
             mock_ctx,
@@ -100,13 +124,19 @@ class TestFindNearby:
         )
         assert result["count"] == 3
         assert result["total_in_radius"] == 10
+        assert len(result["near_features"]) == 3
+        assert len(result["proximity_lines"]) == 3
 
     @pytest.mark.asyncio
     async def test_no_results(self, mock_client, mock_ctx):
         from mcp_arcgis_server.tools.proximity import find_nearby
 
         mock_client.buffer_geometry.return_value = SAMPLE_BUFFER
-        mock_client.query_layer.return_value = {"features": []}
+        mock_client.query_layer.return_value = {
+            "features": [],
+            "geometryType": "esriGeometryPoint",
+            "spatialReference": {"wkid": 4326},
+        }
         result = await find_nearby(
             mock_client,
             mock_ctx,
@@ -116,7 +146,9 @@ class TestFindNearby:
             unit="miles",
         )
         assert result["count"] == 0
-        assert result["features"] == []
+        assert result["near_features"] == []
+        assert result["proximity_lines"] == []
+        assert result["buffer_geometry"] == SAMPLE_BUFFER
 
     @pytest.mark.asyncio
     async def test_where_filter(self, mock_client, mock_ctx):
@@ -190,7 +222,9 @@ class TestFindNearby:
         }
         mock_client.buffer_geometry.return_value = SAMPLE_BUFFER
         mock_client.query_layer.return_value = {
-            "features": [_make_feature("Near", -104.91, 39.71)]
+            "features": [_make_feature("Near", -104.91, 39.71)],
+            "geometryType": "esriGeometryPoint",
+            "spatialReference": {"wkid": 4326},
         }
         result = await find_nearby(
             mock_client,
@@ -201,7 +235,9 @@ class TestFindNearby:
             unit="miles",
         )
         assert result["count"] == 1
-        assert result["features"][0]["distance"] is not None
+        # Proximity line should exist with distance in feet
+        assert len(result["proximity_lines"]) == 1
+        assert result["proximity_lines"][0]["attributes"]["distance"] is not None
         # Verify buffer_geometry was called with normalized polygon
         mock_client.buffer_geometry.assert_called_once()
 
@@ -217,4 +253,4 @@ class TestFindNearby:
             radius=5,
             unit="miles",
         )
-        assert result["error"] == "Invalid geometry JSON"
+        assert result["error"] == "Invalid geometry"

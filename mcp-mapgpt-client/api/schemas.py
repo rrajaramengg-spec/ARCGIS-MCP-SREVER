@@ -59,16 +59,22 @@ class ArcGISQueryResult(BaseModel):
 
 
 class ExecuteResponse(BaseModel):
-    """Response model for the /execute endpoint (actual ArcGIS execution)."""
+    """Response model for the /execute endpoint (actual ArcGIS execution).
+
+    Graph path populates ``results`` (typed feature_set/geocode dicts).
+    LLM paths (execute-llm, arcgis-execute) populate ``data``/``tool_name``/``tool_args``.
+    """
 
     action: str
     message: Optional[str] = None
     data: Optional[Any] = None
     tool_name: Optional[str] = None
     tool_args: Optional[Dict[str, Any]] = None
+    results: Optional[List[Dict[str, Any]]] = Field(None, description="Typed result array (feature_set/geocode dicts with role field)")
     execution_time_ms: float
     timing: Optional[Dict[str, float]] = Field(None, description="Per-phase timing breakdown (ms)")
     query_id: Optional[str] = Field(None, description="Unique query ID for feedback linkage")
+    execution_graph: Optional[Dict[str, Any]] = Field(None, description="Graph execution metadata (when graph runtime used)")
 
 
 class SummarizeResponse(BaseModel):

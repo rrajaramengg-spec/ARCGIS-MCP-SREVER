@@ -14,13 +14,13 @@ from core.llm_service import LLMResponse, ToolCallResult
 # ---------------------------------------------------------------------------
 
 def _make_orchestrator(llm_responses, mcp_results=None):
-    """Create a Orchestrator with mocked LLM and MCP client.
+    """Create a MapGPTOrchestrator with mocked LLM and MCP client.
 
     Args:
         llm_responses: List of LLMResponse objects returned sequentially.
         mcp_results: Dict mapping tool_name to return value, or a single value.
     """
-    from core.orchestrator import Orchestrator
+    from core.orchestrator import MapGPTOrchestrator
 
     mock_mcp = MagicMock()
     mock_mcp.is_connected = True
@@ -45,7 +45,7 @@ def _make_orchestrator(llm_responses, mcp_results=None):
     _responses = list(llm_responses)
     mock_llm.complete = AsyncMock(side_effect=_responses)
 
-    orchestrator = Orchestrator(mock_mcp, mock_llm)
+    orchestrator = MapGPTOrchestrator(mock_mcp, mock_llm)
     # Clear the shared tools cache to avoid list_tools call
     orchestrator._tools_cache.clear()
 
@@ -100,7 +100,8 @@ class TestToolCallingLoopCap:
 
     @pytest.mark.asyncio
     async def test_loop_stops_at_5_iterations(self):
-        # Create 6 responses: 5 tool calls + 1 final (but we only get 5+1)
+        from core.exceptions import QueryPlanError
+
         tool_call_response = LLMResponse(
             tool_calls=[
                 ToolCallResult(
@@ -110,30 +111,15 @@ class TestToolCallingLoopCap:
                 )
             ]
         )
-        # 5 tool-call responses, then a text response (should be reached after 5th iteration)
-        # Actually, the loop runs while has_tool_calls and iteration < 5
-        # So after 5 iterations it stops. The 6th complete() call returns the text.
-        # But wait — the loop calls complete() after each iteration.
-        # Initial call (1) + 5 iterations (5 re-calls) = 6 complete() calls total.
-        # We need 6 responses: initial returns tool_call, 4 re-calls return tool_call,
-        # 5th re-call returns tool_call (iteration=5 → loop exits).
-        # Actually: while response.has_tool_calls and iteration < 5:
-        #   iteration += 1 ... response = complete()
-        # So iteration goes 1,2,3,4,5 — after iteration 5, check: has_tool_calls AND 5 < 5 → False, exit
-        # So we need: initial (1) + 5 re-calls (5) = 6 complete() calls
-        # All 6 can return tool calls — the loop stops regardless at iteration 5
+        # All responses return tool calls — loop exhausts max_iterations and raises
         llm_responses = [tool_call_response] * 6
 
         orch, mock_mcp, mock_llm = _make_orchestrator(
             llm_responses,
             {"search_content": {"items": [], "count": 0}},
         )
-        result = await orch.arcgis_execute("loop test")
-
-        # Should have called complete() exactly 6 times: 1 initial + 5 re-calls
-        assert mock_llm.complete.call_count == 6
-        # Should have called call_tool 5 times (once per iteration)
-        assert mock_mcp.call_tool.call_count == 5
+        with pytest.raises(QueryPlanError, match="exceeded"):
+            await orch.arcgis_execute("loop test")
 
 
 # ---------------------------------------------------------------------------
@@ -203,7 +189,7 @@ class TestActionMapping:
 
         expected = {
             "geocode": "locate",
-            "reverse_geocode": "locate",
+            "reversegeocode": "locate",
             "query_features": "query",
             "spatial_join_query": "query",
             "join_layers": "query",
@@ -237,7 +223,7 @@ class TestMultiStepChain:
     @pytest.mark.asyncio
     async def test_search_then_query_chain(self):
         search_result = {
-            "items": [{"title": "parks", "url": "https://services.arcgis.com/fire/FeatureServer/0", "type": "Feature Layer"}],
+            "items": [{"title": "Fire Stations", "url": "https://services.arcgis.com/fire/FeatureServer/0", "type": "Feature Layer"}],
             "count": 1,
         }
         query_result = {
@@ -252,7 +238,7 @@ class TestMultiStepChain:
                     ToolCallResult(
                         tool_call_id="tc1",
                         tool_name="search_content",
-                        tool_input={"query": "parks"},
+                        tool_input={"query": "fire stations"},
                     )
                 ]
             ),
@@ -279,7 +265,7 @@ class TestMultiStepChain:
         }
 
         orch, mock_mcp, _ = _make_orchestrator(llm_responses, mcp_results)
-        result = await orch.arcgis_execute("show me parks in Pennsylvania")
+        result = await orch.arcgis_execute("show me fire stations in Pennsylvania")
 
         # Final action should be 'query' (from query_features, the last tool)
         assert result["action"] == "query"
@@ -295,7 +281,7 @@ class TestMultiStepChain:
 # ---------------------------------------------------------------------------
 
 class TestArcgisExecuteEndpoint:
-    """6.7: POST /api/v1/arcgis-execute returns 200."""
+    """6.7: POST /api/mapgpt/v1/arcgis-execute returns 200."""
 
     def test_arcgis_execute_endpoint_returns_200(self):
         mock_result = {
@@ -307,35 +293,41 @@ class TestArcgisExecuteEndpoint:
             "execution_time_ms": 100,
         }
 
-        with patch("main.mcp_client") as mock_mcp, \
-             patch("main.orchestrator") as mock_orch:
-            mock_mcp.is_connected = True
-            mock_orch.arcgis_execute = AsyncMock(return_value=mock_result)
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
-            from fastapi.testclient import TestClient
-            from main import app
-
+        mock_orch = MagicMock()
+        mock_orch.arcgis_execute = AsyncMock(return_value=mock_result)
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
             client = TestClient(app, raise_server_exceptions=False)
             response = client.post(
-                "/api/v1/arcgis-execute",
+                "/api/mapgpt/v1/arcgis-execute",
                 json={"query": "geocode 123 Main St"},
             )
             assert response.status_code == 200
             data = response.json()
             assert data["action"] == "locate"
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
     def test_arcgis_execute_empty_query_returns_422(self):
-        with patch("main.mcp_client") as mock_mcp:
-            mock_mcp.is_connected = True
-            from fastapi.testclient import TestClient
-            from main import app
+        from fastapi.testclient import TestClient
+        from main import app
+        from core.providers import get_orchestrator
 
+        mock_orch = MagicMock()
+        app.dependency_overrides[get_orchestrator] = lambda: mock_orch
+        try:
             client = TestClient(app, raise_server_exceptions=False)
             response = client.post(
-                "/api/v1/arcgis-execute",
+                "/api/mapgpt/v1/arcgis-execute",
                 json={},
             )
             assert response.status_code == 422
+        finally:
+            app.dependency_overrides.pop(get_orchestrator, None)
 
 
 # ---------------------------------------------------------------------------
@@ -374,7 +366,7 @@ class TestCommandsList:
             from main import app
 
             client = TestClient(app, raise_server_exceptions=False)
-            response = client.get("/api/v1/commands")
+            response = client.get("/api/mapgpt/v1/commands")
             assert response.status_code == 200
             commands = response.json()
             names = [c["name"] for c in commands]
