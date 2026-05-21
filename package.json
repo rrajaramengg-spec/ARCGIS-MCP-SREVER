@@ -1,4 +1,23 @@
 {
+  "name": "ai-arcgis-platform-mcp-rag",
+  "description": "AI-powered GIS platform with MCP Server, RAG pipeline, LLM orchestration, and ArcGIS integration",
+  "keywords": [
+    "mcp",
+    "mcp-server",
+    "arcgis",
+    "gis",
+    "rag",
+    "retrieval-augmented-generation",
+    "llm",
+    "azure-openai",
+    "spatial-analysis",
+    "geocoding",
+    "geospatial",
+    "ai-agent",
+    "model-context-protocol",
+    "pgvector",
+    "fastapi"
+  ],
   "dependencies": {
     "openspec": "^0.0.0"
   }
